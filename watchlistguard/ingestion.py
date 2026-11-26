@@ -4,17 +4,21 @@ import hashlib
 import io
 import sqlite3
 from pathlib import Path
+from typing import Optional
 from .screening import normalize_name
 from .audit import log_event
 
 REQUIRED = {"transaction_ref", "customer_name", "amount", "currency"}
 
+
 class IngestionError(ValueError):
     """Raised when an input CSV cannot be safely ingested."""
 
-def ingest_csv(conn: sqlite3.Connection, path: str) -> dict[str, int]:
+
+def ingest_csv(conn: sqlite3.Connection, path: str, source_name: Optional[str] = None) -> dict[str, int]:
     """Validate and ingest a CSV atomically; repeated file bytes are skipped."""
     file_path = Path(path)
+    display_name = Path(source_name).name if source_name else file_path.name
     if not file_path.is_file():
         raise IngestionError(f"File not found: {path}")
     raw = file_path.read_bytes()
@@ -46,12 +50,20 @@ def ingest_csv(conn: sqlite3.Connection, path: str) -> dict[str, int]:
                 rejected += 1
                 continue
             try:
-                conn.execute("""INSERT INTO transactions(transaction_ref,customer_name,normalized_name,amount,currency,source_file)
-                                VALUES(?,?,?,?,?,?)""", (ref, name, normalize_name(name), amount, currency, file_path.name))
+                conn.execute(
+                    """INSERT INTO transactions(transaction_ref,customer_name,normalized_name,amount,currency,source_file)
+                       VALUES(?,?,?,?,?,?)""",
+                    (ref, name, normalize_name(name), amount, currency, display_name),
+                )
                 inserted += 1
             except sqlite3.IntegrityError:
                 duplicates += 1
-        conn.execute("INSERT INTO processed_files(file_name,sha256,row_count) VALUES(?,?,?)",
-                     (file_path.name, fingerprint, inserted))
-        log_event(conn, "INGEST", f"file={file_path.name}; inserted={inserted}; rejected={rejected}; duplicates={duplicates}")
+        conn.execute(
+            "INSERT INTO processed_files(file_name,sha256,row_count) VALUES(?,?,?)",
+            (display_name, fingerprint, inserted),
+        )
+        log_event(
+            conn, "INGEST",
+            f"file={display_name}; inserted={inserted}; rejected={rejected}; duplicates={duplicates}",
+        )
     return {"inserted": inserted, "rejected": rejected, "duplicates": duplicates, "skipped_file": 0}
