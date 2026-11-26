@@ -21,7 +21,7 @@ def create_app(test_config=None):
     app.config.update(
         SECRET_KEY=os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32),
         DATABASE=os.environ.get("WATCHLISTGUARD_DB", "data/watchlistguard.db"),
-        MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
+        MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES + 64 * 1024,
     )
     if test_config:
         app.config.update(test_config)
