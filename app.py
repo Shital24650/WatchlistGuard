@@ -1,10 +1,10 @@
-"""Flask dashboard for the synthetic WatchlistGuard demonstration."""
+"""Flask dashboard and JSON API for the synthetic WatchlistGuard demo."""
 import os
 import secrets
 import tempfile
 from pathlib import Path
 
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
@@ -12,6 +12,7 @@ from watchlistguard.audit import verify_chain, log_event
 from watchlistguard.db import connect, initialize, seed_watchlist
 from watchlistguard.ingestion import IngestionError, ingest_csv
 from watchlistguard.service import report_rows, screen_pending
+from watchlistguard.openapi import openapi_document
 
 MAX_UPLOAD_BYTES = 1024 * 1024
 
@@ -39,14 +40,57 @@ def create_app(test_config=None):
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; style-src 'self'; form-action 'self'; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' https://unpkg.com; "
+            "style-src 'self' 'unsafe-inline' https://unpkg.com; "
+            "connect-src 'self'; form-action 'self'; frame-ancestors 'none'",
         )
         return response
 
     @app.errorhandler(RequestEntityTooLarge)
     def too_large(_error):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Upload exceeds the 1 MB file limit."}), 413
         flash("Upload rejected: CSV files must be 1 MB or smaller.", "error")
         return redirect(url_for("dashboard")), 303
+
+    def process_upload(upload_file):
+        if upload_file is None or not upload_file.filename:
+            return None, ("A CSV file is required in the 'file' field.", 400)
+        filename = secure_filename(upload_file.filename)
+        if not filename or Path(filename).suffix.lower() != ".csv":
+            return None, ("Only files with a .csv extension are accepted.", 400)
+        raw = upload_file.stream.read(MAX_UPLOAD_BYTES + 1)
+        if not raw:
+            return None, ("The selected CSV file is empty.", 400)
+        if len(raw) > MAX_UPLOAD_BYTES:
+            return None, ("Upload rejected: CSV files must be 1 MB or smaller.", 413)
+
+        temp_path = None
+        conn = None
+        try:
+            conn = database()
+            with tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False) as temp:
+                temp.write(raw)
+                temp_path = temp.name
+            result = ingest_csv(conn, temp_path, source_name=filename)
+            return result, None
+        except (IngestionError, OSError, UnicodeError, ValueError):
+            if conn is not None:
+                conn.rollback()
+            return None, ("CSV could not be processed. Check its format and required columns.", 400)
+        except Exception:
+            if conn is not None:
+                conn.rollback()
+            app.logger.exception("Unexpected upload processing error")
+            return None, ("Upload could not be completed. Please try again.", 500)
+        finally:
+            if conn is not None:
+                conn.close()
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    app.logger.warning("Could not remove temporary upload file")
 
     @app.get("/health")
     def health():
@@ -56,7 +100,77 @@ def create_app(test_config=None):
             conn.close()
             return {"status": "ok"}, 200
         except Exception:
+            app.logger.exception("Health check failed")
             return {"status": "unavailable"}, 503
+
+    @app.get("/api/openapi.json")
+    def openapi_json():
+        return jsonify(openapi_document())
+
+    @app.get("/api/docs")
+    def api_docs():
+        return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WatchlistGuard API documentation</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="/static/swagger-init.js"></script>
+</body>
+</html>"""
+
+    @app.post("/api/upload")
+    def api_upload():
+        result, error = process_upload(request.files.get("file"))
+        if error:
+            message, status = error
+            return jsonify({"error": message}), status
+        return jsonify({"message": "CSV processed.", **result}), 200
+
+    @app.post("/api/screen")
+    def api_screen():
+        conn = database()
+        try:
+            count = screen_pending(conn)
+            return jsonify({"message": "Screening completed.", "screened": count}), 200
+        except Exception:
+            conn.rollback()
+            app.logger.exception("API screening failed")
+            return jsonify({"error": "Screening could not be completed."}), 500
+        finally:
+            conn.close()
+
+    @app.get("/api/report")
+    def api_report():
+        conn = database()
+        try:
+            rows = [dict(row) for row in report_rows(conn)]
+            return jsonify({"count": len(rows), "results": rows}), 200
+        except Exception:
+            app.logger.exception("API report failed")
+            return jsonify({"error": "Report could not be generated."}), 500
+        finally:
+            conn.close()
+
+    @app.post("/api/audit/verify")
+    def api_audit_verify():
+        conn = database()
+        try:
+            ok, message = verify_chain(conn)
+            with conn:
+                log_event(conn, "AUDIT_VERIFY", "result=" + ("ok" if ok else "failed"))
+            return jsonify({"valid": ok, "message": message}), (200 if ok else 409)
+        except Exception:
+            conn.rollback()
+            app.logger.exception("API audit verification failed")
+            return jsonify({"error": "Audit verification could not be completed."}), 500
+        finally:
+            conn.close()
 
     @app.get("/")
     def dashboard():
@@ -88,46 +202,15 @@ def create_app(test_config=None):
 
     @app.post("/upload")
     def upload():
-        upload_file = request.files.get("file")
-        if upload_file is None or not upload_file.filename:
-            flash("Choose a CSV file to upload.", "error")
-            return redirect(url_for("dashboard"))
-        filename = secure_filename(upload_file.filename)
-        if not filename or Path(filename).suffix.lower() != ".csv":
-            flash("Only files with a .csv extension are accepted.", "error")
-            return redirect(url_for("dashboard"))
-        raw = upload_file.stream.read(MAX_UPLOAD_BYTES + 1)
-        if not raw:
-            flash("The selected CSV file is empty.", "error")
-            return redirect(url_for("dashboard"))
-        if len(raw) > MAX_UPLOAD_BYTES:
-            flash("Upload rejected: CSV files must be 1 MB or smaller.", "error")
-            return redirect(url_for("dashboard"))
-        temp_path = None
-        conn = database()
-        try:
-            with tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False) as temp:
-                temp.write(raw)
-                temp_path = temp.name
-            result = ingest_csv(conn, temp_path, source_name=filename)
+        result, error = process_upload(request.files.get("file"))
+        if error:
+            message, _status = error
+            flash(message, "error")
+        else:
             flash(
                 "CSV processed: " + ", ".join(f"{key}={value}" for key, value in result.items()),
                 "success",
             )
-        except (IngestionError, OSError, UnicodeError, ValueError):
-            conn.rollback()
-            flash("The CSV could not be processed. Check its format and required columns.", "error")
-        except Exception:
-            conn.rollback()
-            app.logger.exception("Unexpected upload processing error")
-            flash("The upload could not be completed. Please try again.", "error")
-        finally:
-            conn.close()
-            if temp_path:
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
         return redirect(url_for("dashboard"))
 
     @app.post("/screen")
