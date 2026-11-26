@@ -63,7 +63,7 @@ def create_app(test_config=None):
         if not raw:
             return None, ("The selected CSV file is empty.", 400)
         if len(raw) > MAX_UPLOAD_BYTES:
-            return None, ("Upload exceeds the 1 MB file limit.", 413)
+            return None, ("Upload rejected: CSV files must be 1 MB or smaller.", 413)
 
         temp_path = None
         conn = database()
