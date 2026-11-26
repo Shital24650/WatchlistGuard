@@ -133,8 +133,10 @@ class WatchlistGuardApiTests(unittest.TestCase):
         response = self.client.get("/api/docs")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"swagger-ui", response.data)
-        self.assertIn(b"/api/openapi.json", response.data)
         self.assertIn(b"/static/swagger-init.js", response.data)
+        initializer = self.client.get("/static/swagger-init.js")
+        self.assertEqual(initializer.status_code, 200)
+        self.assertIn(b"/api/openapi.json", initializer.data)
 
     def test_upload_database_failure_returns_json_error(self):
         self.app.config["DATABASE"] = self.temp_dir.name

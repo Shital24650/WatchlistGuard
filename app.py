@@ -75,10 +75,12 @@ def create_app(test_config=None):
             result = ingest_csv(conn, temp_path, source_name=filename)
             return result, None
         except (IngestionError, OSError, UnicodeError, ValueError):
-            conn.rollback()
+            if conn is not None:
+                conn.rollback()
             return None, ("CSV could not be processed. Check its format and required columns.", 400)
         except Exception:
-            conn.rollback()
+            if conn is not None:
+                conn.rollback()
             app.logger.exception("Unexpected upload processing error")
             return None, ("Upload could not be completed. Please try again.", 500)
         finally:
