@@ -161,7 +161,7 @@ def create_app(test_config=None):
             return value
 
         try:
-            page = query_integer("page", 1, 1)
+            page = query_integer("page", 1, 1, 2147483647)
             page_size = query_integer("page_size", 20, 1, 100)
             risk_level = request.args.get("risk_level")
             if risk_level is not None:

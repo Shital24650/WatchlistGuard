@@ -66,8 +66,8 @@ class WatchlistGuardApiTests(unittest.TestCase):
     def test_duplicate_transaction_ref_across_changed_files_is_skipped(self):
         self.upload()
         changed = (
-            b"transaction_ref,customer_name,amount,currency\\n"
-            b"API-001,Changed Name,999,USD\\nAPI-003,New Customer,12,EUR\\n"
+            b"transaction_ref,customer_name,amount,currency\n"
+            b"API-001,Changed Name,999,USD\nAPI-003,New Customer,12,EUR\n"
         )
         response = self.upload("changed.csv", changed)
         self.assertEqual(response.status_code, 200)
@@ -79,17 +79,17 @@ class WatchlistGuardApiTests(unittest.TestCase):
         self.assertEqual(rows[0]["customer_name"], "Amina Rahman")
 
     def test_duplicate_refs_inside_one_batch_are_counted_without_crash(self):
-        data = (b"transaction_ref,customer_name,amount,currency\\n"
-                b"SAME,First,10,USD\\nSAME,Second,20,USD\\n")
+        data = (b"transaction_ref,customer_name,amount,currency\n"
+                b"SAME,First,10,USD\nSAME,Second,20,USD\n")
         response = self.upload("same-batch.csv", data)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["inserted"], 1)
         self.assertEqual(response.get_json()["duplicates"], 1)
 
     def test_invalid_rows_do_not_corrupt_valid_rows(self):
-        data = (b"transaction_ref,customer_name,amount,currency\\n"
-                b"GOOD-1,Valid Person,10,USD\\nBAD-1,Invalid Amount,-3,USD\\n"
-                b"GOOD-2,Another Person,15,EUR\\n")
+        data = (b"transaction_ref,customer_name,amount,currency\n"
+                b"GOOD-1,Valid Person,10,USD\nBAD-1,Invalid Amount,-3,USD\n"
+                b"GOOD-2,Another Person,15,EUR\n")
         response = self.upload("mixed.csv", data)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["inserted"], 2)
