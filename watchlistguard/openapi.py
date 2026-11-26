@@ -14,6 +14,7 @@ def openapi_document():
             "title": "WatchlistGuard API",
             "version": "1.0.0",
             "description": (
+                "Idempotent CSV ingestion skips identical SHA-256 files and deduplicates changed files by unique transaction_ref. "
                 "Educational transaction-screening demo using synthetic data only. "
                 "Do not submit personal, banking, or production customer information."
             ),
@@ -117,38 +118,41 @@ def openapi_document():
             "/api/report": {
                 "get": {
                     "tags": ["Transactions"],
-                    "summary": "Return all transaction screening results",
+                    "summary": "Return a paginated screening report",
+                    "description": "Results are ordered by transaction insertion ID. Defaults: page=1, page_size=20.",
+                    "parameters": [
+                        {"name": "page", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1, "default": 1}},
+                        {"name": "page_size", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+                        {"name": "risk_level", "in": "query", "required": False, "schema": {"type": "string", "enum": ["PENDING", "LOW", "MEDIUM", "HIGH"]}},
+                        {"name": "screening_status", "in": "query", "required": False, "schema": {"type": "string", "enum": ["PENDING", "SCREENED"]}},
+                    ],
                     "responses": {
                         "200": {
-                            "description": "Report rows, including pending transactions",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "required": ["count", "results"],
+                            "description": "Filtered page and pagination metadata",
+                            "content": {"application/json": {"schema": {
+                                "type": "object",
+                                "required": ["count", "results", "pagination"],
+                                "properties": {
+                                    "count": {"type": "integer", "description": "Total matching rows"},
+                                    "results": {"type": "array", "items": {"type": "object", "properties": {
+                                        "transaction_ref": {"type": "string"},
+                                        "customer_name": {"type": "string"},
+                                        "amount": {"type": "number"},
+                                        "currency": {"type": "string"},
+                                        "risk_level": {"type": "string", "enum": ["PENDING", "LOW", "MEDIUM", "HIGH"]},
+                                        "risk_score": {"type": "integer"},
+                                        "match_type": {"type": "string"},
+                                        "explanation": {"type": "string"},
+                                    }}},
+                                    "pagination": {"type": "object", "required": ["page", "page_size", "total", "total_pages"],
                                         "properties": {
-                                            "count": {"type": "integer"},
-                                            "results": {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "transaction_ref": {"type": "string"},
-                                                        "customer_name": {"type": "string"},
-                                                        "amount": {"type": "number"},
-                                                        "currency": {"type": "string"},
-                                                        "risk_level": {"type": "string", "enum": ["PENDING", "LOW", "MEDIUM", "HIGH"]},
-                                                        "risk_score": {"type": "integer"},
-                                                        "match_type": {"type": "string"},
-                                                        "explanation": {"type": "string"},
-                                                    },
-                                                },
-                                            },
-                                        },
-                                    }
-                                }
-                            },
+                                            "page": {"type": "integer"}, "page_size": {"type": "integer"},
+                                            "total": {"type": "integer"}, "total_pages": {"type": "integer"},
+                                        }},
+                                },
+                            }}},
                         },
+                        "400": {"description": "Invalid query parameter", "content": {"application/json": {"schema": error}}},
                         "500": {"description": "Report generation failed", "content": {"application/json": {"schema": error}}},
                     },
                 }

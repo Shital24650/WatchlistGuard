@@ -11,7 +11,7 @@ from werkzeug.utils import secure_filename
 from watchlistguard.audit import verify_chain, log_event
 from watchlistguard.db import connect, initialize, seed_watchlist
 from watchlistguard.ingestion import IngestionError, ingest_csv
-from watchlistguard.service import report_rows, screen_pending
+from watchlistguard.service import report_rows, report_page, screen_pending
 from watchlistguard.openapi import openapi_document
 
 MAX_UPLOAD_BYTES = 1024 * 1024
@@ -147,10 +147,47 @@ def create_app(test_config=None):
 
     @app.get("/api/report")
     def api_report():
+        def query_integer(name, default, minimum, maximum=None):
+            raw_value = request.args.get(name)
+            if raw_value is None:
+                return default
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} must be an integer.")
+            if value < minimum or (maximum is not None and value > maximum):
+                limit = f" and at most {maximum}" if maximum is not None else ""
+                raise ValueError(f"{name} must be at least {minimum}{limit}.")
+            return value
+
+        try:
+            page = query_integer("page", 1, 1, 2147483647)
+            page_size = query_integer("page_size", 20, 1, 100)
+            risk_level = request.args.get("risk_level")
+            if risk_level is not None:
+                risk_level = risk_level.strip().upper()
+                if risk_level not in {"PENDING", "LOW", "MEDIUM", "HIGH"}:
+                    raise ValueError("risk_level must be PENDING, LOW, MEDIUM, or HIGH.")
+            screening_status = request.args.get("screening_status")
+            if screening_status is not None:
+                screening_status = screening_status.strip().upper()
+                if screening_status not in {"PENDING", "SCREENED"}:
+                    raise ValueError("screening_status must be PENDING or SCREENED.")
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
         conn = database()
         try:
-            rows = [dict(row) for row in report_rows(conn)]
-            return jsonify({"count": len(rows), "results": rows}), 200
+            total, rows = report_page(conn, page, page_size, risk_level, screening_status)
+            total_pages = (total + page_size - 1) // page_size
+            return jsonify({
+                "count": total,
+                "results": [dict(row) for row in rows],
+                "pagination": {
+                    "page": page, "page_size": page_size,
+                    "total": total, "total_pages": total_pages,
+                },
+            }), 200
         except Exception:
             app.logger.exception("API report failed")
             return jsonify({"error": "Report could not be generated."}), 500

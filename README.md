@@ -11,6 +11,8 @@ WatchlistGuard is an educational transaction-screening portfolio project. It dem
 - JSON API documented with OpenAPI 3.0.3 and interactive Swagger UI.
 - SQLite path configurable with `WATCHLISTGUARD_DB` (or CLI `--db`).
 - CSV upload restricted to `.csv`, sanitized filenames, and a 1 MB file limit.
+- Atomic idempotent ingestion: identical file bytes are skipped by SHA-256; changed files are deduplicated by the globally unique `transaction_ref` database constraint.
+- SQL-paginated report API with risk-level and screening-status filters.
 - Parameterized SQL, Jinja autoescaping, generic API errors, and security response headers.
 - Gunicorn WSGI server and Render Blueprint configuration.
 
@@ -52,10 +54,57 @@ All API responses use JSON except the Swagger UI HTML route. The API is local/de
 | GET | `/api/docs` | Interactive Swagger UI |
 | POST | `/api/upload` | Upload a CSV as multipart field `file` |
 | POST | `/api/screen` | Screen all pending transactions |
-| GET | `/api/report` | Return screening report rows |
+| GET | `/api/report` | Return a paginated, filterable screening report |
 | POST | `/api/audit/verify` | Verify the audit chain and record the check |
 
-Upload requires CSV headers `transaction_ref,customer_name,amount,currency`. A successful response includes `inserted`, `rejected`, `duplicates`, and `skipped_file` counts. Invalid uploads return 400, files above 1 MB return 413, audit-chain tampering returns 409, and unexpected API failures return a generic 500 response.
+Upload requires CSV headers `transaction_ref,customer_name,amount,currency`. The schema defines `transactions.transaction_ref` as `UNIQUE`, so that field—not customer name, amount, or file name—is the transaction identity. Byte-identical files are skipped by SHA-256 (`skipped_file=1`). Changed files are checked row-by-row: an existing reference increments `duplicates` and leaves the original row unchanged, while other valid rows in the same file are inserted. Invalid rows increment `rejected`. A SQLite write reservation serializes upload writers and the unique constraint is the final duplicate guard.
+
+Successful upload responses include `inserted`, `rejected`, `duplicates`, and `skipped_file`. Invalid uploads return 400, files above 1 MB return 413, audit-chain tampering returns 409, and unexpected API failures return a generic 500 response.
+
+### Report pagination and filters
+
+`GET /api/report` accepts these optional query parameters:
+
+| Parameter | Default | Allowed values |
+|---|---:|---|
+| `page` | 1 | Integer ≥ 1 |
+| `page_size` | 20 | Integer 1–100 |
+| `risk_level` | — | `PENDING`, `LOW`, `MEDIUM`, `HIGH` |
+| `screening_status` | — | `PENDING`, `SCREENED` |
+
+Filters can be combined. Invalid values return HTTP 400. Rows are ordered by transaction insertion ID. The SQL query applies `LIMIT` and `OFFSET`; the endpoint does not load the full report into Python memory. The existing `count` field remains the total number of matching rows, and a new `pagination` object describes the requested page.
+
+```bash
+curl "http://127.0.0.1:5000/api/report?page=1&page_size=20"
+curl "http://127.0.0.1:5000/api/report?risk_level=HIGH&screening_status=SCREENED&page=2&page_size=10"
+```
+
+Example response (synthetic):
+
+```json
+{
+  "count": 3,
+  "results": [
+    {
+      "transaction_ref": "SYN-1001",
+      "customer_name": "Amina Rahman",
+      "amount": 125.5,
+      "currency": "USD",
+      "risk_level": "HIGH",
+      "risk_score": 90,
+      "match_type": "EXACT",
+      "explanation": "Synthetic watchlist match"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 1,
+    "total": 3,
+    "total_pages": 3
+  }
+}
+```
+
 
 Example:
 
