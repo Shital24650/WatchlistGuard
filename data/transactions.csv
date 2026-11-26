@@ -1,0 +1,7 @@
+transaction_ref,customer_name,amount,currency
+TXN-1001,Amina Rahman,1250.00,USD
+TXN-1002,Amna Rahman,800.00,USD
+TXN-1003,Jordan Lee,250.00,INR
+TXN-1004,Victor Mensah,5200.00,EUR
+TXN-1005,Northstar Trading Ltd,999.99,GBP
+TXN-1006,Invalid Person,-5,USD
