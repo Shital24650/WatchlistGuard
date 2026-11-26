@@ -66,8 +66,9 @@ def create_app(test_config=None):
             return None, ("Upload rejected: CSV files must be 1 MB or smaller.", 413)
 
         temp_path = None
-        conn = database()
+        conn = None
         try:
+            conn = database()
             with tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False) as temp:
                 temp.write(raw)
                 temp_path = temp.name
@@ -81,7 +82,8 @@ def create_app(test_config=None):
             app.logger.exception("Unexpected upload processing error")
             return None, ("Upload could not be completed. Please try again.", 500)
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
             if temp_path:
                 try:
                     os.unlink(temp_path)
@@ -116,13 +118,7 @@ def create_app(test_config=None):
 <body>
   <div id="swagger-ui"></div>
   <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-  <script>
-    window.onload = () => SwaggerUIBundle({
-      url: "/api/openapi.json",
-      dom_id: "#swagger-ui",
-      deepLinking: true
-    });
-  </script>
+  <script src="/static/swagger-init.js"></script>
 </body>
 </html>"""
 
