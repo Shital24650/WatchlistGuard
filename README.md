@@ -1,123 +1,92 @@
 # WatchlistGuard
 
-WatchlistGuard is a lightweight Python transaction-screening portfolio project. It demonstrates CSV ingestion and validation, duplicate prevention, transparent synthetic watchlist matching, SQLite persistence, Bash automation, unit testing, and SHA-256 hash-chained audit events.
+WatchlistGuard is a lightweight transaction-screening portfolio project demonstrating Python, CSV validation, SQLite, Bash, transparent synthetic name matching, risk classification, Flask web development, and SHA-256 hash-chained audit events.
 
-> **Scope:** Educational prototype using synthetic data only. It is not a production AML, sanctions-screening, or banking compliance system; it has no regulatory certification and must not be used to make real customer or payment decisions.
+> **DEMO ONLY — SYNTHETIC DATA.** Never upload real customer, personal, payment, or banking information. This educational prototype is not a production AML or sanctions-screening system, does not make real financial decisions, and is not a claim of regulatory compliance or production-grade banking security.
 
-## Requirements and installation
+## Features
 
-- Python 3.9 or newer
-- Bash for the automation scripts (Linux, macOS, or Termux)
-- No third-party Python packages are required.
+- Existing CLI retained in main.py.
+- Flask dashboard: summary, CSV upload, screening action, results, risk scores/classifications, audit verification, recent activity.
+- /health endpoint for hosting health checks.
+- SQLite path configurable through WATCHLISTGUARD_DB (or CLI --db).
+- CSV upload restricted to .csv, sanitized filenames, 1 MB limit, and generic user-facing errors.
+- Parameterized SQL and Jinja autoescaping.
+- Gunicorn production WSGI server and Render Blueprint configuration.
 
-```bash
-git clone https://github.com/Shital24650/WatchlistGuard.git
-cd WatchlistGuard
-python3 --version
-python3 -m unittest discover -v
-```
+## Install and run locally
 
-The application creates `data/watchlistguard.db` on first CLI use. For an isolated run, pass `--db /tmp/watchlistguard-demo.db` before the command.
+Requires Python 3.9+, Flask and Gunicorn.
 
-## CLI
+\`\`\`bash
+python -m pip install -r requirements.txt
+export WATCHLISTGUARD_DB=data/watchlistguard-web.db
+export FLASK_SECRET_KEY="replace-with-a-long-random-secret"
+flask --app app run --host 127.0.0.1 --port 5000
+\`\`\`
 
-```bash
-python3 main.py --db /tmp/watchlistguard-demo.db ingest data/transactions.csv
-python3 main.py --db /tmp/watchlistguard-demo.db screen
-python3 main.py --db /tmp/watchlistguard-demo.db report
-python3 main.py --db /tmp/watchlistguard-demo.db audit-verify
-```
+Open http://127.0.0.1:5000. The database is initialized automatically. The included data/transactions.csv contains fictional sample records.
 
-The `--db` option is optional; without it, the default database is `data/watchlistguard.db`.
+For a production-style local run:
 
-Expected sample-data behavior:
+\`\`\`bash
+gunicorn --workers 1 --threads 4 --timeout 60 --bind 0.0.0.0:\${PORT:-5000} app:app
+\`\`\`
 
-```text
-Ingestion: inserted=5, rejected=1, duplicates=0, skipped_file=0
-Screened 5 pending transaction(s).
-REF | CUSTOMER | AMOUNT | RISK | SCORE | MATCH
-TXN-1001 | Amina Rahman | USD 1250.00 | HIGH | 90 | EXACT
-TXN-1002 | Amna Rahman | USD 800.00 | HIGH | 86 | APPROXIMATE
-TXN-1003 | Jordan Lee | INR 250.00 | LOW | 0 | NONE
-TXN-1004 | Victor Mensah | EUR 5200.00 | HIGH | 85 | EXACT
-TXN-1005 | Northstar Trading Ltd | GBP 999.99 | HIGH | 75 | EXACT
-Total: 5 transaction(s).
-Verified 2 audit event(s).
-```
+Set FLASK_SECRET_KEY to a strong private random value in the hosting environment. Never commit secrets. The application has a random per-process fallback for local demonstration; configure the environment variable for stable sessions across restarts.
 
-A repeated file with identical bytes is skipped using its SHA-256 fingerprint. A different file containing an already-seen transaction reference is counted as a duplicate. Invalid rows are rejected and reported in the ingestion summary. Missing or malformed input returns a non-zero exit code.
+## Deploy to Render
 
-## Bash automation
+render.yaml defines the web service, dependency build command, Gunicorn start command, and /health check.
 
-```bash
-chmod +x scripts/*.sh
-./scripts/ingest.sh data/transactions.csv
-./scripts/run_screening.sh
-```
+1. Push the branch to GitHub.
+2. In Render, create a new Blueprint instance and select this repository and branch.
+3. Confirm the settings from render.yaml and deploy.
+4. Add FLASK_SECRET_KEY in the Render environment settings.
+5. Confirm the deployed service URL and its /health endpoint return {"status":"ok"}.
 
-The scripts enable strict Bash error handling, log to `logs/`, validate usage, and propagate command failures.
+**SQLite persistence on free hosting:** Render free web services have an ephemeral filesystem. A SQLite database in the project directory can be reset when the service restarts, redeploys, or sleeps. The included free-tier configuration is suitable for a disposable portfolio demo, not durable storage. For persistent SQLite on Render, attach a persistent disk (where available on a paid service) and set WATCHLISTGUARD_DB to a path on that disk, such as /var/data/watchlistguard.db. SQLite is a single-file database and is not suitable for horizontally scaled multi-instance services. A real multi-user production system needs a managed database and a much broader security architecture.
+
+## Existing CLI
+
+The web app imports existing project modules; it does not replace the CLI.
+
+\`\`\`bash
+python main.py --db /tmp/watchlistguard-demo.db ingest data/transactions.csv
+python main.py --db /tmp/watchlistguard-demo.db screen
+python main.py --db /tmp/watchlistguard-demo.db report
+python main.py --db /tmp/watchlistguard-demo.db audit-verify
+\`\`\`
+
+Optional Bash scripts: chmod +x scripts/*.sh, then run scripts/ingest.sh data/transactions.csv and scripts/run_screening.sh.
+
+## CSV format
+
+Required headers: transaction_ref, customer_name, amount, currency. Use fictional records only. The web upload limit is 1 MB. The ingestion module validates rows, rejects invalid values, and detects duplicate transactions and repeated files.
 
 ## Architecture
 
-```text
-CSV → main.py → ingestion.py → transactions / processed_files
-                         │
-                         └── audit.py → audit_logs
-transactions → service.py → screening.py ← watchlist
-                                  │
-                                  ▼
-                           screening_results
-                                  │
-                                  ▼
-                              report CLI
-```
+\`\`\`text
+Browser → Flask routes (app.py)
+             ├── CSV upload → ingestion.py → SQLite
+             ├── Run screening → service.py → screening.py → SQLite
+             ├── Results → service.report_rows() → dashboard template
+             ├── Audit check → audit.py → audit_logs
+             └── /health → SQLite connectivity check
 
-### Folder structure
+CLI (main.py) → same underlying project modules
+\`\`\`
 
-```text
-.
-├── .github/workflows/tests.yml  # GitHub Actions unit tests
-├── data/transactions.csv        # Fictional sample transactions
-├── scripts/                     # Bash ingestion and screening wrappers
-├── tests/                       # unittest suite (isolated in-memory DBs)
-├── watchlistguard/
-│   ├── audit.py                 # SHA-256 audit chain
-│   ├── db.py                    # SQLite schema, indexes, seed list
-│   ├── ingestion.py             # CSV validation and deduplication
-│   ├── screening.py             # Name normalization, similarity, risk score
-│   └── service.py               # Screening and report use cases
-└── main.py                      # CLI entry point
-```
+## Tests and CI
 
-## Screening model
+\`\`\`bash
+python -m unittest discover -v
+\`\`\`
 
-Names are case-folded, punctuation is converted to spaces, and whitespace is collapsed. Exact normalized matches are identified directly. Approximate matching uses Python's `difflib.SequenceMatcher` with a similarity threshold of 0.82.
+The suite includes existing CLI/module tests and Flask endpoint tests for health, dashboard summary, upload, screening, report display, audit verification, invalid extensions, malformed/missing CSV columns, empty files, upload size limits, and HTML escaping. GitHub Actions installs requirements.txt and runs the complete suite on pushes and pull requests.
 
-For a qualifying match, the score is the configured synthetic watchlist weight multiplied by similarity (exact matches use 1.0), rounded to an integer and capped at 100. Bands are LOW (0–34), MEDIUM (35–74), and HIGH (75–100). Explanations include the matched synthetic entry, match type, similarity, weight, and score. This intentionally simple demonstration does not implement aliases, transliteration, date-of-birth/address matching, list updates, or human case review.
+## Screening model and limitations
 
-## Database and security controls
+Names are normalized and compared using exact matching or difflib.SequenceMatcher with a threshold of 0.82. Synthetic watchlist weights produce LOW (0–34), MEDIUM (35–74), or HIGH (75–100) scores. The simplified model does not implement aliases, transliteration, date-of-birth/address matching, external list updates, PEP/adverse-media screening, case management, or human review.
 
-SQLite tables: `transactions`, `watchlist`, `screening_results`, `audit_logs`, and `processed_files`. The schema uses primary keys, foreign keys, uniqueness/check constraints, and indexes. SQL values are bound through parameterized statements. Ingestion and screening writes use database transactions. The SQL injection test confirms user-controlled values are treated as data rather than SQL syntax.
-
-The audit log stores event ID, UTC timestamp, event type, details, previous record hash, and current record hash. SHA-256 is calculated over canonical JSON including the previous hash. Verification checks both each event digest and its link to the preceding record. This is tamper-evident, not tamper-proof: an attacker able to rewrite the database and recompute the entire chain could defeat it. Production-grade audit systems need independently protected checkpoints and access controls.
-
-## Testing and continuous integration
-
-Run locally:
-
-```bash
-python3 -m unittest discover -v
-```
-
-GitHub Actions runs the same standard-library test suite on every push and pull request. Workflow: `.github/workflows/tests.yml`.
-
-Tests use in-memory SQLite databases and temporary synthetic CSV files. They cover valid/invalid and malformed CSV input, duplicate handling, exact/approximate matching, risk bands, parameterized-query safety, screening persistence, audit verification, and audit tampering.
-
-## Limitations
-
-- Synthetic sample names and transactions only; never load real customer, bank, or payment data.
-- No external APIs, credentials, paid services, or non-standard Python dependencies.
-- Not a production AML or sanctions-screening system and not a claim of regulatory compliance or certification.
-- No regulatory policy engine, PEP/adverse-media screening, list licensing, transliteration, alias resolution, case management, human review, model validation, or operational resilience controls.
-- SQLite is appropriate for this small local demonstration, not a high-throughput multi-user deployment.
-- Name similarity is illustrative and requires careful calibration and human review in any real-world context.
+The audit log is a SHA-256 hash chain. It is tamper-evident, not tamper-proof; an actor able to rewrite the database and recompute the chain can defeat it. This is a learning/portfolio demonstration only, not a production AML, sanctions, or banking compliance solution.
