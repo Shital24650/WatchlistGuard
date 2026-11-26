@@ -1,5 +1,4 @@
 """Flask dashboard for the synthetic WatchlistGuard demonstration."""
-import hashlib
 import os
 import secrets
 import tempfile
@@ -110,12 +109,7 @@ def create_app(test_config=None):
             with tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False) as temp:
                 temp.write(raw)
                 temp_path = temp.name
-            result = ingest_csv(conn, temp_path)
-            conn.execute(
-                "UPDATE processed_files SET file_name = ? WHERE sha256 = ?",
-                (filename, hashlib.sha256(raw).hexdigest()),
-            )
-            conn.commit()
+            result = ingest_csv(conn, temp_path, source_name=filename)
             flash(
                 "CSV processed: " + ", ".join(f"{key}={value}" for key, value in result.items()),
                 "success",
