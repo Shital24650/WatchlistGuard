@@ -3,12 +3,18 @@ import os
 import secrets
 import tempfile
 import hmac
+import json
+import logging
 import time
-from datetime import timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from pathlib import Path
 
-from flask import Flask, flash, g, jsonify, redirect, render_template, request, session, url_for, abort
+from flask import (
+    Flask, abort, flash, g, has_request_context, jsonify, redirect, render_template,
+    request, session, url_for,
+)
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
@@ -26,13 +32,58 @@ _LOGIN_WINDOW_SECONDS = 60
 _LOGIN_LIMIT = 10
 
 
+class JsonLogFormatter(logging.Formatter):
+    """Emit compact JSON while keeping exception contents out of logs."""
+
+    def format(self, record):
+        payload = {
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for key in ("request_id", "method", "path", "status", "duration_ms", "error_type"):
+            value = getattr(record, key, None)
+            if value is not None:
+                payload[key] = value
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+class RequestContextLogFilter(logging.Filter):
+    def filter(self, record):
+        if has_request_context():
+            record.request_id = getattr(g, "request_id", None)
+        return True
+
+
+def _configure_logging(app):
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonLogFormatter())
+    handler.addFilter(RequestContextLogFilter())
+    app.logger.handlers.clear()
+    app.logger.addHandler(handler)
+    app.logger.setLevel(logging.INFO)
+    app.logger.propagate = False
+
+
 def create_app(test_config=None):
     app = Flask(__name__)
-    production = bool(os.environ.get("RENDER") or os.environ.get("APP_ENV") == "production")
+    environment = os.environ.get("APP_ENV", "development").strip().lower()
+    if environment not in {"development", "testing", "production"}:
+        raise RuntimeError("APP_ENV must be development, testing, or production")
+    production = bool(os.environ.get("RENDER") or environment == "production")
     configured_secret = os.environ.get("FLASK_SECRET_KEY")
     if production and not configured_secret:
         raise RuntimeError("FLASK_SECRET_KEY is required in production")
+    pool_size = os.environ.get("WATCHLISTGUARD_DB_POOL_SIZE", "5")
+    try:
+        if not 1 <= int(pool_size) <= 50:
+            raise ValueError
+    except ValueError as exc:
+        raise RuntimeError("WATCHLISTGUARD_DB_POOL_SIZE must be an integer from 1 to 50") from exc
     app.config.update(
+        APP_ENV=environment,
+        TESTING=environment == "testing",
         SECRET_KEY=configured_secret or secrets.token_hex(32),
         DATABASE=os.environ.get("WATCHLISTGUARD_DATABASE_URL") or os.environ.get(
             "WATCHLISTGUARD_DB", "data/watchlistguard.db"),
@@ -47,6 +98,27 @@ def create_app(test_config=None):
     )
     if test_config:
         app.config.update(test_config)
+
+    _configure_logging(app)
+
+    @app.before_request
+    def start_request_observation():
+        g.request_id = uuid.uuid4().hex
+        g.request_started = time.perf_counter()
+
+    @app.after_request
+    def finish_request_observation(response):
+        request_id = getattr(g, "request_id", uuid.uuid4().hex)
+        response.headers["X-Request-ID"] = request_id
+        started = getattr(g, "request_started", time.perf_counter())
+        app.logger.info(
+            "http_request",
+            extra={"request_id": request_id, "method": request.method,
+                   "path": request.url_rule.rule if request.url_rule else "unmatched",
+                   "status": response.status_code,
+                   "duration_ms": round((time.perf_counter() - started) * 1000, 2)},
+        )
+        return response
 
     def database():
         conn = connect(app.config["DATABASE"])
@@ -104,6 +176,14 @@ def create_app(test_config=None):
         flash(f"Upload rejected: CSV files must be {limit_mb} MB or smaller.", "error")
         return redirect(url_for("dashboard")), 303
 
+    @app.errorhandler(500)
+    def unexpected_error(error):
+        cause = getattr(error, "original_exception", None) or error
+        app.logger.error("unhandled_request_error", extra={"error_type": type(cause).__name__})
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "An unexpected server error occurred."}), 500
+        return error
+
     def process_upload(upload_file):
         if upload_file is None or not upload_file.filename:
             return None, ("A CSV file is required in the 'file' field.", 400)
@@ -132,10 +212,10 @@ def create_app(test_config=None):
             if conn is not None:
                 conn.rollback()
             return None, ("CSV could not be processed. Check its format and required columns.", 400)
-        except Exception:
+        except Exception as exc:
             if conn is not None:
                 conn.rollback()
-            app.logger.exception("Unexpected upload processing error")
+            app.logger.error("upload_processing_failed", extra={"error_type": type(exc).__name__})
             return None, ("Upload could not be completed. Please try again.", 500)
         finally:
             if conn is not None:
@@ -148,14 +228,25 @@ def create_app(test_config=None):
 
     @app.get("/health")
     def health():
+        conn = None
         try:
             conn = database()
             conn.execute("SELECT 1").fetchone()
-            conn.close()
             return {"status": "ok"}, 200
-        except Exception:
-            app.logger.exception("Health check failed")
+        except Exception as exc:
+            app.logger.error("readiness_check_failed", extra={"error_type": type(exc).__name__})
             return {"status": "unavailable"}, 503
+        finally:
+            if conn is not None:
+                conn.close()
+
+    @app.get("/live")
+    def liveness():
+        return {"status": "ok"}, 200
+
+    @app.get("/ready")
+    def readiness():
+        return health()
 
     @app.get("/api/openapi.json")
     def openapi_json():
@@ -389,9 +480,9 @@ def create_app(test_config=None):
         try:
             count = screen_pending(conn)
             return jsonify({"message": "Screening completed.", "screened": count}), 200
-        except Exception:
+        except Exception as exc:
             conn.rollback()
-            app.logger.exception("API screening failed")
+            app.logger.error("api_screening_failed", extra={"error_type": type(exc).__name__})
             return jsonify({"error": "Screening could not be completed."}), 500
         finally:
             conn.close()
@@ -440,8 +531,8 @@ def create_app(test_config=None):
                     "total": total, "total_pages": total_pages,
                 },
             }), 200
-        except Exception:
-            app.logger.exception("API report failed")
+        except Exception as exc:
+            app.logger.error("api_report_failed", extra={"error_type": type(exc).__name__})
             return jsonify({"error": "Report could not be generated."}), 500
         finally:
             conn.close()
@@ -455,9 +546,9 @@ def create_app(test_config=None):
             with conn:
                 log_event(conn, "AUDIT_VERIFY", "result=" + ("ok" if ok else "failed"))
             return jsonify({"valid": ok, "message": message}), (200 if ok else 409)
-        except Exception:
+        except Exception as exc:
             conn.rollback()
-            app.logger.exception("API audit verification failed")
+            app.logger.error("api_audit_verification_failed", extra={"error_type": type(exc).__name__})
             return jsonify({"error": "Audit verification could not be completed."}), 500
         finally:
             conn.close()
@@ -512,9 +603,9 @@ def create_app(test_config=None):
         try:
             count = screen_pending(conn)
             flash(f"Screening completed. {count} pending transaction(s) processed.", "success")
-        except Exception:
+        except Exception as exc:
             conn.rollback()
-            app.logger.exception("Screening action failed")
+            app.logger.error("screening_action_failed", extra={"error_type": type(exc).__name__})
             flash("Screening could not be completed. Please try again.", "error")
         finally:
             conn.close()
@@ -532,9 +623,9 @@ def create_app(test_config=None):
                 message if ok else "Audit verification failed. Review the audit history.",
                 "success" if ok else "error",
             )
-        except Exception:
+        except Exception as exc:
             conn.rollback()
-            app.logger.exception("Audit verification action failed")
+            app.logger.error("audit_verification_failed", extra={"error_type": type(exc).__name__})
             flash("Audit verification could not be completed.", "error")
         finally:
             conn.close()

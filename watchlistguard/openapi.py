@@ -33,9 +33,26 @@ def openapi_document():
             "/health": {
                 "get": {
                     "tags": ["Health"],
-                    "summary": "Check application and SQLite availability",
+                    "summary": "Check application and database availability",
                     "responses": {
                         "200": {"description": "Application is available"},
+                        "503": {"description": "Database is unavailable"},
+                    },
+                }
+            },
+            "/live": {
+                "get": {
+                    "tags": ["Health"],
+                    "summary": "Check whether the application process is alive",
+                    "responses": {"200": {"description": "Application process is alive"}},
+                }
+            },
+            "/ready": {
+                "get": {
+                    "tags": ["Health"],
+                    "summary": "Check application and database readiness",
+                    "responses": {
+                        "200": {"description": "Application and database are ready"},
                         "503": {"description": "Database is unavailable"},
                     },
                 }
