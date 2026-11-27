@@ -50,11 +50,17 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             csv_path.write_text("transaction_ref,customer_name,amount,currency\nPG-SYN-2,Amina Rahman,10,USD\nPG-SYN-3,Jordan Lee,20,EUR\n")
             first = ingest_csv(self.conn, str(csv_path))
             again = ingest_csv(self.conn, str(csv_path))
+            changed = Path(folder) / "changed.csv"
+            changed.write_text("transaction_ref,customer_name,amount,currency\nPG-SYN-2,Changed Name,99,USD\nPG-SYN-4,New Person,4,GBP\n")
+            duplicate_result = ingest_csv(self.conn, str(changed))
         self.assertEqual(first["inserted"], 2)
         self.assertEqual(again["skipped_file"], 1)
-        self.assertEqual(screen_pending(self.conn), 2)
+        self.assertEqual((duplicate_result["inserted"], duplicate_result["duplicates"]), (1, 1))
+        self.assertEqual(screen_pending(self.conn), 3)
         total, rows = report_page(self.conn, page=1, page_size=1, screening_status="SCREENED")
-        self.assertEqual((total, len(rows)), (2, 1))
+        self.assertEqual((total, len(rows)), (3, 1))
+        high_total, _ = report_page(self.conn, risk_level="HIGH")
+        self.assertEqual(high_total, 1)
         with self.conn:
             log_event(self.conn, "PG_TEST", "synthetic")
         self.assertTrue(verify_chain(self.conn)[0])
@@ -135,6 +141,18 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertTrue(verify_chain(self.conn)[0])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions WHERE transaction_ref LIKE 'PG-CONCURRENT-%'").fetchone()[0], 6)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM audit_logs WHERE event_type='CONCURRENT_TEST'").fetchone()[0], 6)
+
+    def test_broken_lease_is_replaced_on_reconnect(self):
+        broken = connect()
+        broken.raw.close()
+        with self.assertRaises(Exception):
+            broken.execute("SELECT 1")
+        close(broken)
+        replacement = connect()
+        try:
+            self.assertEqual(replacement.execute("SELECT 1").fetchone()[0], 1)
+        finally:
+            close(replacement)
 
 
 if __name__ == "__main__":

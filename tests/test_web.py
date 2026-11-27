@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from app import create_app
+from tests.security_client import sign_in_admin
 
 VALID_CSV = (b"transaction_ref,customer_name,amount,currency\n"
              b"WEB-001,Amina Rahman,125.50,USD\n"
@@ -16,7 +17,7 @@ class WatchlistGuardWebTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         db_path = os.path.join(self.temp_dir.name, "web-test.db")
         self.app = create_app({"TESTING": True, "DATABASE": db_path, "SECRET_KEY": "test-only"})
-        self.client = self.app.test_client()
+        self.client = sign_in_admin(self.app, db_path)
 
     def tearDown(self):
         self.temp_dir.cleanup()

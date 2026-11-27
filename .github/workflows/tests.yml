@@ -18,11 +18,17 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install web dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements-dev.txt
       - name: Compile Python sources
         run: python -m compileall -q app.py main.py watchlistguard tests
       - name: Run complete test suite
         run: python -m unittest discover -v
+      - name: Run authentication and authorization security suite
+        run: python -m unittest tests.test_security -v
+      - name: Run Bandit security checks
+        run: bandit -q -r app.py main.py watchlistguard
+      - name: Validate OpenAPI contract
+        run: python -c "from app import app; from openapi_spec_validator import validate; validate(app.test_client().get('/api/openapi.json').get_json())"
   postgres:
     runs-on: ubuntu-latest
     services:
@@ -48,4 +54,4 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: alembic upgrade head
       - run: python -m compileall -q app.py main.py watchlistguard tests migrations
-      - run: python -m unittest tests.test_postgres_integration -v
+      - run: python -m unittest tests.test_postgres_integration tests.test_security_postgres -v
