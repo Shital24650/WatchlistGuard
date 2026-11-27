@@ -35,17 +35,19 @@ def report_page(conn, page=1, page_size=20, risk_level=None, screening_status=No
           AND (CAST(? AS TEXT) IS NULL OR (? = 'PENDING' AND s.id IS NULL)
                         OR (? = 'SCREENED' AND s.id IS NOT NULL))"""
     parameters = [risk_level, risk_level, screening_status, screening_status, screening_status]
+    count_sql = "SELECT COUNT(*)" + filter_sql
     total = conn.execute(
-        "SELECT COUNT(*)" + filter_sql,
+        count_sql,
         parameters,
     ).fetchone()[0]
-    rows = conn.execute(
-        """SELECT t.transaction_ref,t.customer_name,t.amount,t.currency,
+    page_sql = """SELECT t.transaction_ref,t.customer_name,t.amount,t.currency,
                   COALESCE(s.risk_level,'PENDING') AS risk_level,
                   COALESCE(s.risk_score,0) AS risk_score,
                   COALESCE(s.match_type,'NOT_SCREENED') AS match_type,
                   COALESCE(s.explanation,'Awaiting screening') AS explanation
-           """ + filter_sql + " ORDER BY t.id ASC LIMIT ? OFFSET ?",
+           """ + filter_sql + " ORDER BY t.id ASC LIMIT ? OFFSET ?"
+    rows = conn.execute(
+        page_sql,
         parameters + [page_size, (page - 1) * page_size],
     ).fetchall()
     return total, rows

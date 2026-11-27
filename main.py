@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """WatchlistGuard command-line interface."""
 import argparse
+from getpass import getpass
 import sys
-from watchlistguard.db import connect, initialize, seed_watchlist
+from watchlistguard.db import begin_admin_write, connect, initialize, seed_watchlist
 from watchlistguard.ingestion import ingest_csv, IngestionError
 from watchlistguard.service import screen_pending, report_rows
 from watchlistguard.audit import verify_chain
+from watchlistguard.auth import create_user
+from watchlistguard.audit import log_event
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Synthetic transaction screening demonstration")
@@ -15,11 +18,27 @@ def main() -> int:
     sub.add_parser("screen", help="Screen pending transactions")
     sub.add_parser("report", help="Show screening report")
     sub.add_parser("audit-verify", help="Verify SHA-256 audit chain")
+    sub.add_parser("create-admin", help="Bootstrap an administrator if none is active")
     args = parser.parse_args()
     conn = connect(args.db)
     try:
         initialize(conn); seed_watchlist(conn)
-        if args.command == "ingest":
+        if args.command == "create-admin":
+            password = getpass("New administrator password (12+ chars): ")
+            confirmation = getpass("Confirm password: ")
+            if password != confirmation:
+                raise ValueError("Passwords do not match.")
+            with conn:
+                begin_admin_write(conn)
+                active_admins = conn.execute(
+                    "SELECT COUNT(*) FROM app_users WHERE role='ADMINISTRATOR' AND active=?", (True,)
+                ).fetchone()[0]
+                if active_admins:
+                    raise ValueError("An active administrator already exists; use administrator user management.")
+                user = create_user(conn, input("Administrator username: "), password, "ADMINISTRATOR")
+                log_event(conn, "USER_CREATED", f"user_id={user['id']}; role=ADMINISTRATOR; bootstrap=true")
+            print(f"Administrator created: {user['username']}")
+        elif args.command == "ingest":
             result = ingest_csv(conn, args.csv_file)
             print("Ingestion:", ", ".join(f"{k}={v}" for k, v in result.items()))
         elif args.command == "screen":
