@@ -17,7 +17,7 @@
 - A pooled-lease regression starts an explicit transaction, writes, returns the lease, then verifies through a separate lease that cleanup rolled the write back.
 - The application health path test simulates migration validation failure and confirms rollback and lease release. `app.database()` now releases a lease if initialization or seeding raises.
 - Top-level PostgreSQL connection contexts use `autocommit=True`, so reads before `with conn` cannot turn the intended transaction into a nested savepoint. Each lease carries its originating URL-keyed pool; cleanup rolls back non-idle leases before returning them.
-- GitHub Actions run `45972308470` passed the earlier review-fix commit with all **6 then-current PostgreSQL integration tests**. The final branch commit adds one more lease cleanup test; its CI run is pending.
+- GitHub Actions run `45974533448` passed on the final database fix commit. SQLite passed, and PostgreSQL 16 ran all **7 integration tests**, including read-before-screen-write persistence, rollback, and clean pooled-lease return.
 - Python compilation, Alembic history, offline `alembic upgrade head --sql`, and `git diff --check` passed.
 - Bandit passed after replacing report filter SQL assembly with fixed SQL and bound filter parameters; report pagination/filter tests passed.
 - No local `EXPLAIN` measurements were available, so this report makes no measured performance claim.
