@@ -95,7 +95,9 @@ class PostgresConnection:
         return self.raw.execute(sql.replace("?", "%s"), params)
 
     def executemany(self, sql, params):
-        return self.raw.executemany(sql.replace("?", "%s"), params)
+        with self.raw.cursor() as cursor:
+            cursor.executemany(sql.replace("?", "%s"), params)
+            return cursor.rowcount
 
     def __enter__(self):
         self._transaction = self.raw.transaction()
