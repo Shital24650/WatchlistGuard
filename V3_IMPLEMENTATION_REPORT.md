@@ -16,7 +16,7 @@
 - PostgreSQL integration regression cases now verify screening writes and its audit record after prior reads, return of the lease, and verification from a separate connection; a synthetic audit failure verifies screening rollback.
 - The application health path test simulates migration validation failure and confirms rollback and lease release. `app.database()` now releases a lease if initialization or seeding raises.
 - Top-level PostgreSQL connection contexts use `autocommit=True`, so reads before `with conn` cannot turn the intended transaction into a nested savepoint. Each lease carries its originating URL-keyed pool; cleanup rolls back non-idle leases before returning them.
-- GitHub Actions run `45969101232` passed the pre-review V3 code. Review-fix CI for the latest commit is pending.
+- GitHub Actions run `45972308470` passed on the review-fix commit. Its PostgreSQL 16 job ran all **6 integration tests** successfully, including the newly added read-before-screen-write persistence and rollback regressions; Alembic upgrade and Python compilation also passed. The SQLite `unittest` job passed.
 - Python compilation, Alembic history, offline `alembic upgrade head --sql`, and `git diff --check` passed.
 - No local `EXPLAIN` measurements were available, so this report makes no measured performance claim.
 
