@@ -67,6 +67,19 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
                 raise RuntimeError("rollback check")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions WHERE transaction_ref=?", ("PG-ROLLBACK",)).fetchone()[0], 0)
 
+    def test_returning_lease_rolls_back_an_open_transaction(self):
+        self.conn.execute("BEGIN")
+        self.conn.execute("INSERT INTO transactions(transaction_ref,customer_name,normalized_name,amount,currency,source_file) VALUES(?,?,?,?,?,?)",
+                          ("PG-LEASE-ROLLBACK", "Synthetic", "synthetic", 1, "USD", "test.csv"))
+        close(self.conn)
+        self.conn = None
+        verifier = connect()
+        try:
+            self.assertEqual(verifier.execute("SELECT COUNT(*) FROM transactions WHERE transaction_ref=?",
+                                              ("PG-LEASE-ROLLBACK",)).fetchone()[0], 0)
+        finally:
+            close(verifier)
+
     def test_screening_read_then_context_commits_results_and_audit_after_lease_return(self):
         self.conn.execute("INSERT INTO transactions(transaction_ref,customer_name,normalized_name,amount,currency,source_file) VALUES(?,?,?,?,?,?)",
                           ("PG-SCREEN-COMMIT", "Amina Rahman", "amina rahman", 10, "USD", "synthetic.csv"))

@@ -174,10 +174,7 @@ def close(conn):
                 conn.raw.rollback()
         except Exception:
             # Ensure a failed lease cannot be handed to the next borrower.
-            try:
-                conn.raw.close()
-            except Exception:
-                pass
+            conn.raw.close()
         finally:
             conn.pool.putconn(conn.raw)
     else:
