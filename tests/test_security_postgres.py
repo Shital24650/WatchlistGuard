@@ -59,8 +59,10 @@ class PostgreSQLAdministratorInvariantTests(unittest.TestCase):
         def demote(username):
             try:
                 barrier.wait(timeout=5)
+                csrf = clients[username].get("/api/auth/csrf").get_json()["csrf_token"]
                 response = clients[username].put(
-                    f"/api/admin/users/{ids[username]}/role", json={"role": "ANALYST"}
+                    f"/api/admin/users/{ids[username]}/role", json={"role": "ANALYST"},
+                    headers={"X-CSRF-Token": csrf},
                 )
                 statuses.append(response.status_code)
             except Exception as exc:
