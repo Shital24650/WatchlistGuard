@@ -1,11 +1,13 @@
 """Flask API integration tests use isolated temporary SQLite databases."""
 import io
 import os
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from app import create_app
+from tests.security_client import sign_in_admin
 from watchlistguard.audit import log_event
 from watchlistguard.db import connect, initialize
 
@@ -25,7 +27,7 @@ class WatchlistGuardApiTests(unittest.TestCase):
             "DATABASE": self.db_path,
             "SECRET_KEY": "test-only-secret",
         })
-        self.client = self.app.test_client()
+        self.client = sign_in_admin(self.app, self.db_path)
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -256,7 +258,8 @@ class WatchlistGuardApiTests(unittest.TestCase):
         spec = response.get_json()
         self.assertEqual(spec["openapi"], "3.0.3")
         for path in ("/health", "/api/openapi.json", "/api/docs", "/api/upload",
-                     "/api/screen", "/api/report", "/api/audit/verify"):
+                     "/api/screen", "/api/report", "/api/audit/verify", "/api/auth/csrf",
+                     "/api/auth/login", "/api/audit", "/api/admin/users", "/api/admin/settings"):
             self.assertIn(path, spec["paths"])
         self.assertEqual(spec["paths"]["/api/upload"]["post"]["responses"]["413"]["description"],
                          "Upload exceeds 1 MB")
@@ -271,8 +274,8 @@ class WatchlistGuardApiTests(unittest.TestCase):
         self.assertIn(b"/api/openapi.json", initializer.data)
 
     def test_upload_database_failure_returns_json_error(self):
-        self.app.config["DATABASE"] = self.temp_dir.name
-        response = self.upload()
+        with patch("app.connect", side_effect=sqlite3.OperationalError("synthetic database outage")):
+            response = self.upload()
         self.assertEqual(response.status_code, 500)
         self.assertIn("error", response.get_json())
 

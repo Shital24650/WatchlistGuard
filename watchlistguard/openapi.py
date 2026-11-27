@@ -16,9 +16,12 @@ def openapi_document():
             "description": (
                 "Idempotent CSV ingestion skips identical SHA-256 files and deduplicates changed files by unique transaction_ref. "
                 "Educational transaction-screening demo using synthetic data only. "
-                "Do not submit personal, banking, or production customer information."
+                    "Do not submit personal, banking, or production customer information. "
+                    "Protected operations use an authenticated HttpOnly session cookie and require X-CSRF-Token on unsafe requests. "
+                    "Roles: ADMINISTRATOR manages users/settings and all operations; ANALYST screens and reads results; AUDITOR reads results and audit records."
             ),
         },
+        "components": {"securitySchemes": {"sessionCookie": {"type": "apiKey", "in": "cookie", "name": "session"}}},
         "servers": [{"url": "/"}],
         "tags": [
             {"name": "Health"},
@@ -43,6 +46,8 @@ def openapi_document():
                     "responses": {"200": {"description": "OpenAPI 3.0 document"}},
                 }
             },
+            "/api/auth/csrf": {"get": {"summary": "Get a CSRF token before login", "responses": {"200": {"description": "CSRF token"}}}},
+            "/api/auth/login": {"post": {"summary": "Authenticate and establish a session", "parameters": [{"name": "X-CSRF-Token", "in": "header", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "Authenticated"}, "401": {"description": "Invalid credentials"}, "429": {"description": "Rate limited"}}}},
             "/api/docs": {
                 "get": {
                     "summary": "Open interactive Swagger UI documentation",
@@ -51,6 +56,7 @@ def openapi_document():
             },
             "/api/upload": {
                 "post": {
+                    "security": [{"sessionCookie": []}],
                     "tags": ["Transactions"],
                     "summary": "Validate and ingest a CSV file",
                     "requestBody": {
@@ -93,6 +99,7 @@ def openapi_document():
             },
             "/api/screen": {
                 "post": {
+                    "security": [{"sessionCookie": []}],
                     "tags": ["Screening"],
                     "summary": "Screen all pending transactions",
                     "responses": {
@@ -117,6 +124,7 @@ def openapi_document():
             },
             "/api/report": {
                 "get": {
+                    "security": [{"sessionCookie": []}],
                     "tags": ["Transactions"],
                     "summary": "Return a paginated screening report",
                     "description": "Results are ordered by transaction insertion ID. Defaults: page=1, page_size=20.",
@@ -159,6 +167,7 @@ def openapi_document():
             },
             "/api/audit/verify": {
                 "post": {
+                    "security": [{"sessionCookie": []}],
                     "tags": ["Audit"],
                     "summary": "Verify the SHA-256 audit chain and record the verification event",
                     "responses": {
@@ -182,5 +191,8 @@ def openapi_document():
                     },
                 }
             },
+            "/api/audit": {"get": {"summary": "Read audit records (administrator or auditor)", "security": [{"sessionCookie": []}], "responses": {"200": {"description": "Audit events"}}}},
+            "/api/admin/users": {"get": {"summary": "List users (administrator)", "security": [{"sessionCookie": []}], "responses": {"200": {"description": "Users"}}}, "post": {"summary": "Create a user (administrator)", "security": [{"sessionCookie": []}], "responses": {"201": {"description": "Created"}}}},
+            "/api/admin/settings": {"get": {"summary": "Read application settings (administrator)", "security": [{"sessionCookie": []}], "responses": {"200": {"description": "Settings"}}}, "put": {"summary": "Update process-local upload and session settings (administrator)", "security": [{"sessionCookie": []}], "responses": {"200": {"description": "Settings updated"}}}},
         },
     }
