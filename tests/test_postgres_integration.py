@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from watchlistguard.db import connect, close, initialize, seed_watchlist
@@ -31,7 +32,8 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         seed_watchlist(self.conn)
 
     def tearDown(self):
-        close(self.conn)
+        if self.conn is not None:
+            close(self.conn)
 
     def test_fresh_migration_and_transaction_ref_uniqueness(self):
         self.assertIsNotNone(self.conn.execute("SELECT 1 FROM watchlist LIMIT 1").fetchone())
@@ -64,6 +66,36 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
                                   ("PG-ROLLBACK", "Synthetic", "synthetic", 1, "USD", "test.csv"))
                 raise RuntimeError("rollback check")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions WHERE transaction_ref=?", ("PG-ROLLBACK",)).fetchone()[0], 0)
+
+    def test_screening_read_then_context_commits_results_and_audit_after_lease_return(self):
+        self.conn.execute("INSERT INTO transactions(transaction_ref,customer_name,normalized_name,amount,currency,source_file) VALUES(?,?,?,?,?,?)",
+                          ("PG-SCREEN-COMMIT", "Amina Rahman", "amina rahman", 10, "USD", "synthetic.csv"))
+        self.conn.commit()
+        # Reproduce the reviewed path: reads happen before screen_pending's
+        # write context, then its pooled lease is returned before verification.
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM screening_results").fetchone()[0], 0)
+        self.assertEqual(screen_pending(self.conn), 1)
+        close(self.conn)
+
+        verifier = connect()
+        try:
+            self.assertEqual(verifier.execute("SELECT COUNT(*) FROM screening_results WHERE transaction_id=(SELECT id FROM transactions WHERE transaction_ref=?)",
+                                              ("PG-SCREEN-COMMIT",)).fetchone()[0], 1)
+            self.assertEqual(verifier.execute("SELECT COUNT(*) FROM audit_logs WHERE event_type='SCREEN' AND details='screened=1'").fetchone()[0], 1)
+            self.assertTrue(verify_chain(verifier)[0])
+        finally:
+            close(verifier)
+        self.conn = None
+
+    def test_screening_failure_rolls_back_results(self):
+        self.conn.execute("INSERT INTO transactions(transaction_ref,customer_name,normalized_name,amount,currency,source_file) VALUES(?,?,?,?,?,?)",
+                          ("PG-SCREEN-ROLLBACK", "Amina Rahman", "amina rahman", 10, "USD", "synthetic.csv"))
+        self.conn.commit()
+        with patch("watchlistguard.service.log_event", side_effect=RuntimeError("synthetic audit failure")):
+            with self.assertRaisesRegex(RuntimeError, "synthetic audit failure"):
+                screen_pending(self.conn)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM screening_results s JOIN transactions t ON t.id=s.transaction_id WHERE t.transaction_ref=?",
+                                           ("PG-SCREEN-ROLLBACK",)).fetchone()[0], 0)
 
     def test_concurrent_transactions_and_audit_appends(self):
         errors = []

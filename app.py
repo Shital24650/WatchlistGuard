@@ -9,7 +9,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from watchlistguard.audit import verify_chain, log_event
-from watchlistguard.db import connect, initialize, seed_watchlist
+from watchlistguard.db import close as close_database, connect, initialize, seed_watchlist
 from watchlistguard.ingestion import IngestionError, ingest_csv
 from watchlistguard.service import report_rows, report_page, screen_pending
 from watchlistguard.openapi import openapi_document
@@ -30,9 +30,16 @@ def create_app(test_config=None):
 
     def database():
         conn = connect(app.config["DATABASE"])
-        initialize(conn)
-        seed_watchlist(conn)
-        return conn
+        try:
+            initialize(conn)
+            seed_watchlist(conn)
+            return conn
+        except Exception:
+            try:
+                conn.rollback()
+            finally:
+                close_database(conn)
+            raise
 
     @app.after_request
     def security_headers(response):

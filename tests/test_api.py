@@ -43,6 +43,16 @@ class WatchlistGuardApiTests(unittest.TestCase):
         self.assertEqual(response.get_json(), {"status": "ok"})
         self.assertTrue(os.path.exists(self.db_path))
 
+    def test_health_returns_database_lease_when_migration_validation_fails(self):
+        conn = unittest.mock.MagicMock()
+        with patch("app.connect", return_value=conn), \
+             patch("app.initialize", side_effect=RuntimeError("synthetic migration check failure")), \
+             patch("app.close_database") as release:
+            response = self.app.test_client().get("/health")
+        self.assertEqual(response.status_code, 503)
+        conn.rollback.assert_called_once()
+        release.assert_called_once_with(conn)
+
     def test_upload_and_report(self):
         response = self.upload()
         self.assertEqual(response.status_code, 200)

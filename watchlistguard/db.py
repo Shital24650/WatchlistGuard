@@ -76,7 +76,7 @@ CREATE INDEX IF NOT EXISTS idx_results_risk ON screening_results(risk_level);
 CREATE INDEX IF NOT EXISTS idx_audit_hash ON audit_logs(current_hash);
 """
 
-_pool = None
+_pools = {}
 _pool_lock = Lock()
 
 
@@ -88,8 +88,9 @@ class HybridRow(dict):
 
 class PostgresConnection:
     """Connection adapter for qmark SQL and pooled PostgreSQL leases."""
-    def __init__(self, raw):
+    def __init__(self, raw, pool):
         self.raw = raw
+        self.pool = pool
 
     @staticmethod
     def _sql(sql):
@@ -106,6 +107,9 @@ class PostgresConnection:
             return cursor.rowcount
 
     def __enter__(self):
+        # Pooled PostgreSQL connections use autocommit=True. A top-level
+        # context therefore opens a real transaction even when reads occurred
+        # before entry; only explicit nesting inside a context creates a savepoint.
         self._transaction = self.raw.transaction()
         self._transaction.__enter__()
         return self
@@ -138,7 +142,6 @@ def is_postgres_url(path):
 
 def connect(path=None):
     """Return a SQLite connection or a pooled psycopg 3 PostgreSQL lease."""
-    global _pool
     path = database_url(path)
     if is_postgres_url(path):
         try:
@@ -146,12 +149,14 @@ def connect(path=None):
         except ImportError as exc:
             raise RuntimeError("PostgreSQL requires psycopg[binary,pool] 3") from exc
         with _pool_lock:
-            if _pool is None or _pool.closed:
-                _pool = ConnectionPool(path, min_size=1, max_size=int(os.getenv("WATCHLISTGUARD_DB_POOL_SIZE", "5")),
-                                       open=True, timeout=5)
-        raw = _pool.getconn(timeout=5)
+            pool = _pools.get(path)
+            if pool is None or pool.closed:
+                pool = ConnectionPool(path, min_size=1, max_size=int(os.getenv("WATCHLISTGUARD_DB_POOL_SIZE", "5")),
+                                      kwargs={"autocommit": True}, open=True, timeout=5)
+                _pools[path] = pool
+        raw = pool.getconn(timeout=5)
         raw.row_factory = lambda cursor: lambda values: HybridRow(zip((c.name for c in cursor.description), values))
-        return PostgresConnection(raw)
+        return PostgresConnection(raw, pool)
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=5)
@@ -163,9 +168,29 @@ def connect(path=None):
 def close(conn):
     """Return a pooled PostgreSQL lease or close a normal SQLite connection."""
     if dialect(conn) == "postgresql":
-        _pool.putconn(conn.raw)
+        try:
+            from psycopg.pq import TransactionStatus
+            if conn.raw.info.transaction_status != TransactionStatus.IDLE:
+                conn.raw.rollback()
+        except Exception:
+            # Ensure a failed lease cannot be handed to the next borrower.
+            try:
+                conn.raw.close()
+            except Exception:
+                pass
+        finally:
+            conn.pool.putconn(conn.raw)
     else:
         conn.close()
+
+
+def close_pools():
+    """Close every pool after request/worker activity has stopped."""
+    with _pool_lock:
+        pools = tuple(_pools.values())
+        _pools.clear()
+        for pool in pools:
+            pool.close()
 
 
 def begin_write(conn):
