@@ -1,26 +1,32 @@
 # V3 database engineering report
 
-## Scope and decisions
+## Architecture and implementation
 
-- Retained SQLite as the default and left its schema initialization, `BEGIN IMMEDIATE`, row format, CLI, and existing SQL behavior intact.
-- Added `WATCHLISTGUARD_DATABASE_URL` / PostgreSQL URL selection, a small qmark-to-psycopg adapter, integer-and-name-compatible mapping rows, and a bounded psycopg 3 connection pool.
-- Kept migrations explicit. PostgreSQL app startup checks for `alembic_version` and fails with migration instructions rather than making schema changes automatically.
-- Added an initial Alembic schema and PostgreSQL 16 CI job. A schema migration does not copy data from an existing SQLite file.
-- Preserved transaction reference and file SHA-256 uniqueness. A transaction-scoped advisory lock serializes PostgreSQL file ingestion; a second transaction-scoped advisory lock prevents audit-chain forks.
-- Added indexes for transaction creation time, normalized name, risk classification, and audit hash. Transaction reference and audit event lookups already use primary/unique indexes; screening status uses the unique transaction foreign key.
+- `watchlistguard/db.py` provides dialect detection, SQLite compatibility, a psycopg 3 connection pool, a qmark SQL adapter, and pooled connection lifecycle handling. SQLite connections remain ordinary `sqlite3.Connection` objects.
+- Alembic migration `0001_initial` models the existing transaction, watchlist, screening, audit, and processed-file schema. PostgreSQL initialization requires the operator to run migrations explicitly.
+- PostgreSQL write transactions use advisory transaction locks for ingestion idempotency and audit-chain append serialization. Transaction references and processed-file digests retain unique constraints.
+- PostgreSQL indexes cover normalized customer lookup, created timestamps, risk classification, and audit hash lookup. Transaction references are indexed by their unique constraint.
+- CI provisions PostgreSQL 16, applies migrations, compiles the Python sources, and runs the opt-in integration suite. SQLite remains in a separate full unit test job.
 
 ## Verification performed
 
-- Baseline before edits: `python -m unittest discover -v` — **57 passed, 0 failed, 0 skipped**.
-- V3 full suite: `python -m unittest discover -v` — **57 passed, 0 failed, 4 skipped**. All four skips identify unavailable PostgreSQL integration infrastructure.
-- `python -m compileall -q app.py main.py watchlistguard tests migrations` — passed.
-- `git diff --check` — passed.
-- `alembic history` and `alembic upgrade head --sql` — passed; generated SQL inspected for the initial migration.
-- `pg_isready` — PostgreSQL server unavailable in this environment. PostgreSQL runtime, integration, concurrency, reconnect, and EXPLAIN measurements therefore remain unverified here. CI is configured to run the opt-in tests against an isolated PostgreSQL 16 service.
-- No Render database was accessed, migrated, or modified. No performance result is claimed.
+- Baseline before implementation: `python -m unittest discover -v` — **57 passed, 0 failed, 0 skipped**.
+- V3 local suite — **61 tests: 57 passed, 0 failed, 4 skipped**. Skips were the PostgreSQL integration tests because no local PostgreSQL service was available.
+- GitHub Actions run `45969101232` passed both `unittest` and PostgreSQL jobs. The PostgreSQL job applied Alembic migrations and completed the PostgreSQL integration tests against PostgreSQL 16, including uniqueness, ingestion duplicates/idempotency, screening, pagination/filtering, audit verification, rollback, concurrent writes, and broken-lease reconnection.
+- Python compilation, Alembic history, offline `alembic upgrade head --sql`, and `git diff --check` passed.
+- No local `EXPLAIN` measurements were available, so this report makes no measured performance claim.
+
+## Files and deployment
+
+- Database adapter and application query changes: `watchlistguard/db.py`, `watchlistguard/ingestion.py`, `watchlistguard/audit.py`, and `watchlistguard/service.py`.
+- Migration environment and initial migration: `alembic.ini`, `migrations/env.py`, and `migrations/versions/0001_initial.py`.
+- Integration tests and CI: `tests/test_postgres_integration.py` and `.github/workflows/tests.yml`.
+- Setup, migration, and configuration guidance: `README.md`.
+- Render configuration was not changed. No production database was accessed or migrated and no deployment was performed.
 
 ## Limitations
 
-- SQLite-to-PostgreSQL data transfer is not implemented; the initial migration only establishes the schema.
-- PostgreSQL integration and query-plan checks require a disposable PostgreSQL server. The tests report `NOT RUN` when `TEST_POSTGRES_URL` is unset.
-- GitHub Actions results are not available until the branch is pushed and CI runs.
+- Existing SQLite rows are not converted automatically; data migration is an operator-managed future task.
+- PostgreSQL migration remains explicit and has only been exercised against the disposable PostgreSQL 16 CI service.
+- No query-plan measurements or benchmark results are claimed.
+- This remains an educational transaction-screening demonstration, not production banking or AML software.
