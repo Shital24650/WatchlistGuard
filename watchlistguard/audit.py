@@ -19,6 +19,11 @@ def log_event(conn: sqlite3.Connection, event_type: str, details: str) -> str:
     # reading the chain head, preventing two writers from forking it.
     if dialect(conn) == "postgresql":
         conn.execute("SELECT pg_advisory_xact_lock(731942817)")
+    elif not conn.in_transaction:
+        # Acquire SQLite's write reservation before reading the chain head.
+        # Otherwise concurrent deferred transactions can read the same head,
+        # then race while upgrading to writers and fork or lose audit appends.
+        conn.execute("BEGIN IMMEDIATE")
     previous = conn.execute("SELECT current_hash FROM audit_logs ORDER BY event_id DESC LIMIT 1").fetchone()
     prev_hash = previous[0] if previous else GENESIS
     timestamp = datetime.now(timezone.utc).isoformat()

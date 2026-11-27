@@ -95,6 +95,9 @@ class ObservabilityTests(unittest.TestCase):
         with patch.dict(os.environ, {"WATCHLISTGUARD_DB_POOL_SIZE": "0"}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "WATCHLISTGUARD_DB_POOL_SIZE"):
                 create_app()
+        with patch.dict(os.environ, {"WATCHLISTGUARD_DB_POOL_TIMEOUT": "31"}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "WATCHLISTGUARD_DB_POOL_TIMEOUT"):
+                create_app()
 
     def test_compose_postgres_credentials_are_url_encoded(self):
         url = database_url_from_environment({

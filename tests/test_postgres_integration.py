@@ -3,6 +3,9 @@ import os
 import tempfile
 import threading
 import unittest
+import uuid
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from pathlib import Path
 
@@ -141,6 +144,68 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertTrue(verify_chain(self.conn)[0])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM transactions WHERE transaction_ref LIKE 'PG-CONCURRENT-%'").fetchone()[0], 6)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM audit_logs WHERE event_type='CONCURRENT_TEST'").fetchone()[0], 6)
+
+    def test_concurrent_duplicate_file_submissions_are_idempotent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            csv_path = Path(folder) / "same-upload.csv"
+            csv_path.write_text(
+                "transaction_ref,customer_name,amount,currency\nPG-DUPLICATE-SUBMIT,Synthetic Person,7,USD\n"
+            )
+            # Leave one lease available for this test case's fixture connection.
+            barrier = threading.Barrier(4)
+
+            def submit(_):
+                conn = connect()
+                try:
+                    barrier.wait(timeout=5)
+                    return ingest_csv(conn, str(csv_path))
+                finally:
+                    close(conn)
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                results = list(executor.map(submit, range(4)))
+        self.assertEqual(sum(result["inserted"] for result in results), 1)
+        self.assertEqual(sum(result["skipped_file"] for result in results), 3)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE transaction_ref=?", ("PG-DUPLICATE-SUBMIT",)
+        ).fetchone()[0], 1)
+        self.assertTrue(verify_chain(self.conn)[0])
+
+    def test_report_indexes_match_filtered_report_query(self):
+        indexes = {row[0] for row in self.conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename='screening_results'"
+        ).fetchall()}
+        self.assertIn("idx_results_risk_transaction", indexes)
+        self.assertNotIn("idx_results_risk", indexes)
+
+    def test_pool_exhaustion_times_out_and_recovers(self):
+        with patch.dict(os.environ, {
+            "WATCHLISTGUARD_DB_POOL_SIZE": "1",
+            "WATCHLISTGUARD_DB_POOL_TIMEOUT": "0.2",
+        }):
+            parts = urlsplit(POSTGRES_URL)
+            query = dict(parse_qsl(parts.query, keep_blank_values=True))
+            query["application_name"] = "wg-pool-test-" + uuid.uuid4().hex
+            url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+            lease = connect(url)
+            pool = lease.pool
+            self.addCleanup(lambda: (self._forget_pool(url), pool.close()))
+            try:
+                from psycopg_pool import PoolTimeout
+                with self.assertRaises(PoolTimeout):
+                    connect(url)
+            finally:
+                close(lease)
+            recovered = connect(url)
+            try:
+                self.assertEqual(recovered.execute("SELECT 1").fetchone()[0], 1)
+            finally:
+                close(recovered)
+
+    @staticmethod
+    def _forget_pool(url):
+        from watchlistguard.db import _pools
+        _pools.pop(url, None)
 
     def test_broken_lease_is_replaced_on_reconnect(self):
         broken = connect()

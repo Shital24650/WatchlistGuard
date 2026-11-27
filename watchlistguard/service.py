@@ -8,7 +8,7 @@ def screen_pending(conn: sqlite3.Connection) -> int:
     """Screen transactions without an existing result in one DB transaction."""
     seed_watchlist(conn)
     entries = conn.execute("SELECT id,name,normalized_name,reason,risk_weight FROM watchlist ORDER BY id").fetchall()
-    pending = conn.execute("""SELECT t.* FROM transactions t LEFT JOIN screening_results s ON s.transaction_id=t.id
+    pending = conn.execute("""SELECT t.id,t.customer_name FROM transactions t LEFT JOIN screening_results s ON s.transaction_id=t.id
                               WHERE s.id IS NULL ORDER BY t.id""").fetchall()
     with conn:
         for tx in pending:
@@ -30,24 +30,71 @@ def report_rows(conn: sqlite3.Connection):
 
 def report_page(conn, page=1, page_size=20, risk_level=None, screening_status=None):
     """Return matching report rows with deterministic SQL-level pagination."""
-    filter_sql = """ FROM transactions t LEFT JOIN screening_results s ON s.transaction_id=t.id
-        WHERE (CAST(? AS TEXT) IS NULL OR COALESCE(s.risk_level, 'PENDING') = ?)
-          AND (CAST(? AS TEXT) IS NULL OR (? = 'PENDING' AND s.id IS NULL)
-                        OR (? = 'SCREENED' AND s.id IS NOT NULL))"""
-    parameters = [risk_level, risk_level, screening_status, screening_status, screening_status]
+    screened_risk = risk_level is not None and risk_level != "PENDING"
+    if screened_risk and screening_status == "PENDING":
+        return 0, []
+    if risk_level == "PENDING" and screening_status == "SCREENED":
+        return 0, []
+    if screened_risk:
+        filter_sql = " FROM screening_results s JOIN transactions t ON t.id=s.transaction_id"
+        predicates = ["s.risk_level = ?"]
+        parameters = [risk_level]
+    else:
+        filter_sql = " FROM transactions t LEFT JOIN screening_results s ON s.transaction_id=t.id"
+        predicates = []
+        parameters = []
+        if risk_level == "PENDING" or screening_status == "PENDING":
+            predicates.append("s.id IS NULL")
+        if screening_status == "SCREENED":
+            predicates.append("s.id IS NOT NULL")
+    if predicates:
+        filter_sql += " WHERE " + " AND ".join(predicates)
     count_sql = "SELECT COUNT(*)" + filter_sql
-    total = conn.execute(
-        count_sql,
-        parameters,
-    ).fetchone()[0]
+    total = conn.execute(count_sql, parameters).fetchone()[0]
     page_sql = """SELECT t.transaction_ref,t.customer_name,t.amount,t.currency,
                   COALESCE(s.risk_level,'PENDING') AS risk_level,
                   COALESCE(s.risk_score,0) AS risk_score,
                   COALESCE(s.match_type,'NOT_SCREENED') AS match_type,
                   COALESCE(s.explanation,'Awaiting screening') AS explanation
-           """ + filter_sql + " ORDER BY t.id ASC LIMIT ? OFFSET ?"
-    rows = conn.execute(
-        page_sql,
-        parameters + [page_size, (page - 1) * page_size],
-    ).fetchall()
+           """ + filter_sql + (" ORDER BY s.transaction_id ASC" if screened_risk else " ORDER BY t.id ASC") + " LIMIT ? OFFSET ?"
+    rows = conn.execute(page_sql, parameters + [page_size, (page - 1) * page_size]).fetchall()
     return total, rows
+
+
+def report_cursor(conn, after_id=0, page_size=20, risk_level=None, screening_status=None):
+    """Fetch the next bounded report slice without a count or deep OFFSET."""
+    screened_risk = risk_level is not None and risk_level != "PENDING"
+    if screened_risk and screening_status == "PENDING":
+        return [], False, None
+    if risk_level == "PENDING" and screening_status == "SCREENED":
+        return [], False, None
+    predicates = ["t.id > ?"]
+    parameters = [after_id]
+    if screened_risk:
+        from_sql = " FROM screening_results s JOIN transactions t ON t.id=s.transaction_id"
+        predicates.append("s.risk_level = ?")
+        parameters.append(risk_level)
+        order_by = "s.transaction_id"
+    else:
+        from_sql = " FROM transactions t LEFT JOIN screening_results s ON s.transaction_id=t.id"
+        if risk_level == "PENDING" or screening_status == "PENDING":
+            predicates.append("s.id IS NULL")
+        if screening_status == "SCREENED":
+            predicates.append("s.id IS NOT NULL")
+        order_by = "t.id"
+    sql = """SELECT t.id AS cursor_id,t.transaction_ref,t.customer_name,t.amount,t.currency,
+        COALESCE(s.risk_level,'PENDING') AS risk_level,
+        COALESCE(s.risk_score,0) AS risk_score,
+        COALESCE(s.match_type,'NOT_SCREENED') AS match_type,
+        COALESCE(s.explanation,'Awaiting screening') AS explanation
+        """ + from_sql + " WHERE " + " AND ".join(predicates) + " ORDER BY " + order_by + " ASC LIMIT ?"
+    fetched = conn.execute(sql, parameters + [page_size + 1]).fetchall()
+    has_more = len(fetched) > page_size
+    rows = fetched[:page_size]
+    next_after_id = rows[-1]["cursor_id"] if has_more and rows else None
+    public_rows = []
+    for row in rows:
+        item = dict(row)
+        item.pop("cursor_id", None)
+        public_rows.append(item)
+    return public_rows, has_more, next_after_id
