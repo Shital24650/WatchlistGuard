@@ -64,3 +64,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build production image
         run: docker build --tag watchlistguard:ci .
+  load-test-tool:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install optional load-testing tools
+        run: python -m pip install -r requirements-dev.txt -r requirements-load.txt
+      - name: Validate load-test sources and dependency security
+        run: |
+          python -m compileall -q locustfile.py benchmarks
+          locust --version
+          locust -f locustfile.py --list
+          pip-audit -r requirements-load.txt

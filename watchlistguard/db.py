@@ -41,10 +41,11 @@ CREATE TABLE IF NOT EXISTS app_users (
  role TEXT NOT NULL CHECK(role IN ('ADMINISTRATOR','ANALYST','AUDITOR')),
  active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_transactions_customer ON transactions(normalized_name);
-CREATE INDEX IF NOT EXISTS idx_transactions_created ON transactions(created_at);
-CREATE INDEX IF NOT EXISTS idx_results_risk ON screening_results(risk_level);
-CREATE INDEX IF NOT EXISTS idx_audit_hash ON audit_logs(current_hash);
+DROP INDEX IF EXISTS idx_transactions_customer;
+DROP INDEX IF EXISTS idx_transactions_created;
+DROP INDEX IF EXISTS idx_results_risk;
+DROP INDEX IF EXISTS idx_audit_hash;
+CREATE INDEX IF NOT EXISTS idx_results_risk_transaction ON screening_results(risk_level, transaction_id);
 """
 
 POSTGRES_SCHEMA = """
@@ -82,14 +83,22 @@ CREATE TABLE IF NOT EXISTS app_users (
  role TEXT NOT NULL CHECK(role IN ('ADMINISTRATOR','ANALYST','AUDITOR')),
  active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_transactions_customer ON transactions(normalized_name);
-CREATE INDEX IF NOT EXISTS idx_transactions_created ON transactions(created_at);
-CREATE INDEX IF NOT EXISTS idx_results_risk ON screening_results(risk_level);
-CREATE INDEX IF NOT EXISTS idx_audit_hash ON audit_logs(current_hash);
+CREATE INDEX IF NOT EXISTS idx_results_risk_transaction ON screening_results(risk_level, transaction_id);
 """
 
 _pools = {}
 _pool_lock = Lock()
+
+
+def pool_timeout_seconds():
+    """Return the bounded lease timeout shared by pool open and checkout."""
+    try:
+        timeout = float(os.getenv("WATCHLISTGUARD_DB_POOL_TIMEOUT", "5"))
+    except ValueError as exc:
+        raise RuntimeError("WATCHLISTGUARD_DB_POOL_TIMEOUT must be between 0.1 and 30 seconds") from exc
+    if not 0.1 <= timeout <= 30:
+        raise RuntimeError("WATCHLISTGUARD_DB_POOL_TIMEOUT must be between 0.1 and 30 seconds")
+    return timeout
 
 
 class HybridRow(dict):
@@ -164,9 +173,9 @@ def connect(path=None):
             pool = _pools.get(path)
             if pool is None or pool.closed:
                 pool = ConnectionPool(path, min_size=1, max_size=int(os.getenv("WATCHLISTGUARD_DB_POOL_SIZE", "5")),
-                                      kwargs={"autocommit": True}, open=True, timeout=5)
+                                      kwargs={"autocommit": True}, open=True, timeout=pool_timeout_seconds())
                 _pools[path] = pool
-        raw = pool.getconn(timeout=5)
+        raw = pool.getconn(timeout=pool_timeout_seconds())
         raw.row_factory = lambda cursor: lambda values: HybridRow(zip((c.name for c in cursor.description), values))
         return PostgresConnection(raw, pool)
     if path != ":memory:":

@@ -208,6 +208,25 @@ def openapi_document():
                     },
                 }
             },
+            "/api/report/cursor": {
+                "get": {
+                    "security": [{"sessionCookie": []}],
+                    "tags": ["Transactions"],
+                    "summary": "Return the next bounded report slice using keyset pagination",
+                    "description": "Add the returned next_after_id to fetch another page. Unlike /api/report, this endpoint does not count all matching rows.",
+                    "parameters": [
+                        {"name": "after_id", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 0, "default": 0}},
+                        {"name": "page_size", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+                        {"name": "risk_level", "in": "query", "required": False, "schema": {"type": "string", "enum": ["PENDING", "LOW", "MEDIUM", "HIGH"]}},
+                        {"name": "screening_status", "in": "query", "required": False, "schema": {"type": "string", "enum": ["PENDING", "SCREENED"]}},
+                    ],
+                    "responses": {
+                        "200": {"description": "One bounded cursor page and continuation metadata"},
+                        "400": {"description": "Invalid query parameter", "content": {"application/json": {"schema": error}}},
+                        "500": {"description": "Report generation failed", "content": {"application/json": {"schema": error}}},
+                    },
+                }
+            },
             "/api/audit": {"get": {"summary": "Read audit records (administrator or auditor)", "security": [{"sessionCookie": []}], "responses": {"200": {"description": "Audit events"}}}},
             "/api/admin/users": {"get": {"summary": "List users (administrator)", "security": [{"sessionCookie": []}], "responses": {"200": {"description": "Users"}}}, "post": {"summary": "Create a user (administrator)", "security": [{"sessionCookie": []}], "responses": {"201": {"description": "Created"}}}},
             "/api/admin/settings": {"get": {"summary": "Read application settings (administrator)", "security": [{"sessionCookie": []}], "responses": {"200": {"description": "Settings"}}}, "put": {"summary": "Update process-local upload and session settings (administrator)", "security": [{"sessionCookie": []}], "responses": {"200": {"description": "Settings updated"}}}},

@@ -63,6 +63,7 @@ All API responses use JSON except the Swagger UI HTML route. Screening and admin
 | POST | `/api/upload` | Upload a CSV as multipart field `file` |
 | POST | `/api/screen` | Screen all pending transactions |
 | GET | `/api/report` | Return a paginated, filterable screening report |
+| GET | `/api/report/cursor` | Return a bounded keyset-paginated report slice |
 | POST | `/api/audit/verify` | Verify the audit chain and record the check |
 | GET | `/api/auth/csrf` | Obtain a CSRF token before login |
 | POST | `/api/auth/login` | Establish an authenticated session |
@@ -160,7 +161,37 @@ alembic upgrade head
 
 The application refuses to create or migrate PostgreSQL schemas at request time. SQLite continues to initialize its demo schema automatically. For an existing PostgreSQL installation, take a verified backup, inspect `alembic current` and `alembic history`, then apply reviewed migrations during a maintenance window. The initial migration creates schema only; it does **not** transfer rows from an existing SQLite file. Do not point migration commands at production without an approved backup and change process. No production database was used here.
 
-The PostgreSQL schema uses identity keys, foreign keys, unique constraints, checks, and indexes for normalized-name lookup, creation time, risk level, and the audit hash chain. Unique constraints provide transaction-reference and file-fingerprint idempotency. Transaction-scoped advisory locks serialize file fingerprint checks and audit-chain appends across PostgreSQL workers. SQLite retains `BEGIN IMMEDIATE` for ingestion serialization.
+The PostgreSQL schema uses identity keys, foreign keys, unique constraints, checks, and workload-selected indexes for risk-filtered report pagination. Unique constraints provide transaction-reference and file-fingerprint idempotency. Transaction-scoped advisory locks serialize file fingerprint checks and audit-chain appends across PostgreSQL workers. SQLite retains `BEGIN IMMEDIATE` for ingestion serialization and audit-chain append ordering.
+
+### Query performance and pagination
+
+The existing `/api/report` endpoint retains its page/total response and `LIMIT`/`OFFSET` behavior for compatibility. Its SQL now adds only requested filters, and risk-level queries start from a composite `(risk_level, transaction_id)` index. A new `/api/report/cursor` endpoint provides bounded keyset pagination using `after_id` and `next_after_id`; it avoids counting all matching rows and avoids deep offsets. The cursor endpoint returns `returned` for the slice size and `has_more` for continuation. Use `next_after_id` unchanged in the next request. Both endpoints cap `page_size` at 100.
+
+The V6 migration removes unused customer/created transaction indexes, replaces the standalone risk index with the composite report index, and drops an explicit audit-hash index already duplicated by the unique constraint. SQLite initialization applies the same index shape to existing demo databases. The changes affect query planning only; they do not change stored transactions or audit records.
+
+### Local performance measurement
+
+Run `python -m benchmarks.report_benchmark --rows 50000` for a deterministic SQLite comparison of the legacy optional-filter/offset query and the V6 report paths. It creates 50,000 synthetic transactions (45,000 screened), runs five warmups and 40 timed samples, checks that legacy and optimized first-page results match, and prints p50/p95/p99 plus SQLite query plans. The recorded run used Python 3.12.3, SQLite 3.45.1, Linux x86_64, and two logical CPUs. Results depend on the local CPU, filesystem, Python, and SQLite build; they are not production capacity claims.
+
+In the V6 development environment, the 50,000-row run measured the legacy first-page filtered report at p50 **27.181 ms**, p95 **28.779 ms**, p99 **29.385 ms**. The optimized first page measured p50 **4.702 ms**, p95 **6.865 ms**, p99 **7.572 ms**. For filtered page 100, the legacy exact-count plus deep-offset path measured p50 **49.227 ms**, p95 **51.552 ms**, p99 **53.356 ms**; the cursor page measured p50 **0.117 ms**, p95 **0.159 ms**, p99 **0.170 ms**. SQLite's plan changed from scanning transactions and probing the screening unique index to searching `idx_results_risk_transaction`.
+
+A local Locust smoke run used Locust 2.47.0, Python 3.12.3, Gunicorn 23.0.0 (one worker, four threads), SQLite 3.45.1, Linux x86_64 with two logical CPUs, 5 users, a 1-user/second spawn rate, and 15 seconds. It started with an empty database and generated 350 synthetic transactions, all of which were screened. It completed 105 requests at **7.51 requests/second**, with **0 failures**, p50 **8 ms**, p95 **150 ms**, and p99 **160 ms**. Authentication's password hashing was included in these results. Both sets of measurements are local synthetic results and do not predict production capacity.
+
+### Load testing
+
+Locust is optional and is not installed in the application image:
+
+```bash
+python -m pip install -r requirements-load.txt
+read -r -p 'Disposable load-test username: ' LOADTEST_USERNAME
+read -r -s -p 'Disposable load-test password: ' LOADTEST_PASSWORD
+printf '\n'
+export LOADTEST_USERNAME LOADTEST_PASSWORD
+locust -f locustfile.py --host http://127.0.0.1:5000 \
+  --headless --users 20 --spawn-rate 2 --run-time 5m --csv=/tmp/watchlistguard-load
+```
+
+Create the account only in a disposable local environment with `python main.py create-admin`, and provide its credentials through environment variables or a local secret manager. Never use production accounts. Start with the included six-row synthetic CSV; Locust also generates synthetic batches of 50 rows. The workload covers login/CSRF, offset and cursor reports, filtered report reads, batch upload, screening, and audit reads. Record user count, spawn rate, duration, dataset size, database type, and pool settings for each run. Locust reports request rate, latency percentiles, and failures. The V6 numbers above came from a local single-host smoke run, not production.
 
 ### Environment variables
 
@@ -171,6 +202,7 @@ The PostgreSQL schema uses identity keys, foreign keys, unique constraints, chec
 | `WATCHLISTGUARD_DATABASE_URL` | Unset | PostgreSQL URL; takes precedence over `WATCHLISTGUARD_DB`. Keep credentials in a secret store. |
 | `WATCHLISTGUARD_DB` | `data/watchlistguard.db` | SQLite database path. |
 | `WATCHLISTGUARD_DB_POOL_SIZE` | `5` | PostgreSQL pool maximum, integer from 1 to 50. |
+| `WATCHLISTGUARD_DB_POOL_TIMEOUT` | `5` seconds | Maximum PostgreSQL connection checkout wait, bounded from 0.1 to 30 seconds. |
 | `WATCHLISTGUARD_COOKIE_SECURE` | `false` outside production | Force Secure on session cookies when TLS terminates outside Render/production detection. |
 | `PORT` | `5000` | HTTP listener used by Gunicorn and the container health check. |
 | `GUNICORN_WORKERS` | `2` in Docker | Gunicorn worker count. |
@@ -263,9 +295,9 @@ Run the full suite:
 python -m unittest discover -v
 ```
 
-The tests cover the existing module/CLI behavior and Flask dashboard/API behavior. API integration tests create a fresh temporary directory and SQLite database per test; they do not use the configured live database or sample JSON/data files. Coverage includes health, valid and invalid uploads, malformed CSV, upload size, screening, reporting, audit success and tampering, authentication, roles, CSRF, sessions, rate limiting, password hashing, security events, OpenAPI JSON, Swagger UI, and existing form routes.
+The tests cover the existing module/CLI behavior and Flask dashboard/API behavior. API integration tests create a fresh temporary directory and SQLite database per test; they do not use the configured live database or sample JSON/data files. Coverage includes health, valid and invalid uploads, malformed CSV, upload size, screening, offset/cursor report contracts, audit success and tampering, authentication, roles, CSRF, sessions, rate limiting, password hashing, security events, OpenAPI JSON, Swagger UI, and existing form routes. Reliability tests exercise concurrent SQLite ingestion and audit appends, transaction uniqueness, audit-chain validity, safe connection-failure responses, pool timeout/recovery, and concurrent PostgreSQL submissions.
 
-Install `requirements-dev.txt` for CI tools. GitHub Actions runs the SQLite/security suites, Bandit, dependency audit, OpenAPI contract validation, Python compilation, PostgreSQL migration upgrade/downgrade validation, PostgreSQL integration tests, and a production Docker image build. PostgreSQL integration tests require a **disposable** empty database selected with `TEST_POSTGRES_URL`; without it they are reported as skipped (`NOT RUN`). The PostgreSQL CI job uses a PostgreSQL 16 service container and a dedicated test database. Never set these test variables to a production or Render URL. CI does not push images or deploy.
+Install `requirements-dev.txt` for CI tools; install `requirements-load.txt` only when running Locust. GitHub Actions runs the SQLite/security suites, Bandit, dependency audit, OpenAPI contract validation, Python compilation, PostgreSQL migration upgrade/downgrade validation, PostgreSQL integration tests, and a production Docker image build. PostgreSQL integration tests require a **disposable** empty database selected with `TEST_POSTGRES_URL`; without it they are reported as skipped (`NOT RUN`). The PostgreSQL CI job uses a PostgreSQL 16 service container and a dedicated test database. Never set these test variables to a production or Render URL. CI does not push images or deploy.
 
 ## Deployment
 

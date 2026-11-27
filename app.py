@@ -19,9 +19,12 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from watchlistguard.audit import verify_chain, log_event
-from watchlistguard.db import begin_admin_write, close as close_database, connect, initialize, seed_watchlist
+from watchlistguard.db import (
+    begin_admin_write, close as close_database, connect, initialize,
+    pool_timeout_seconds, seed_watchlist,
+)
 from watchlistguard.ingestion import IngestionError, ingest_csv
-from watchlistguard.service import report_rows, report_page, screen_pending
+from watchlistguard.service import report_rows, report_page, report_cursor, screen_pending
 from watchlistguard.openapi import openapi_document
 from watchlistguard.auth import authenticate, create_user, current_user, login_required, roles_required
 
@@ -81,6 +84,7 @@ def create_app(test_config=None):
             raise ValueError
     except ValueError as exc:
         raise RuntimeError("WATCHLISTGUARD_DB_POOL_SIZE must be an integer from 1 to 50") from exc
+    pool_timeout_seconds()
     app.config.update(
         APP_ENV=environment,
         TESTING=environment == "testing",
@@ -519,8 +523,9 @@ def create_app(test_config=None):
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
-        conn = database()
+        conn = None
         try:
+            conn = database()
             total, rows = report_page(conn, page, page_size, risk_level, screening_status)
             total_pages = (total + page_size - 1) // page_size
             return jsonify({
@@ -535,7 +540,62 @@ def create_app(test_config=None):
             app.logger.error("api_report_failed", extra={"error_type": type(exc).__name__})
             return jsonify({"error": "Report could not be generated."}), 500
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
+
+    @app.get("/api/report/cursor")
+    @roles_required("ADMINISTRATOR", "ANALYST", "AUDITOR")
+    def api_report_cursor():
+        def query_integer(name, default, minimum, maximum):
+            raw_value = request.args.get(name)
+            if raw_value is None:
+                return default
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} must be an integer.")
+            if value < minimum or value > maximum:
+                raise ValueError(f"{name} must be between {minimum} and {maximum}.")
+            return value
+
+        try:
+            after_id = query_integer("after_id", 0, 0, 9223372036854775807)
+            page_size = query_integer("page_size", 20, 1, 100)
+            risk_level = request.args.get("risk_level")
+            if risk_level is not None:
+                risk_level = risk_level.strip().upper()
+                if risk_level not in {"PENDING", "LOW", "MEDIUM", "HIGH"}:
+                    raise ValueError("risk_level must be PENDING, LOW, MEDIUM, or HIGH.")
+            screening_status = request.args.get("screening_status")
+            if screening_status is not None:
+                screening_status = screening_status.strip().upper()
+                if screening_status not in {"PENDING", "SCREENED"}:
+                    raise ValueError("screening_status must be PENDING or SCREENED.")
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        conn = None
+        try:
+            conn = database()
+            rows, has_more, next_after_id = report_cursor(
+                conn, after_id, page_size, risk_level, screening_status,
+            )
+            return jsonify({
+                "returned": len(rows),
+                "results": rows,
+                "pagination": {
+                    "page_size": page_size,
+                    "after_id": after_id,
+                    "next_after_id": next_after_id,
+                    "has_more": has_more,
+                },
+            }), 200
+        except Exception as exc:
+            app.logger.error("api_cursor_report_failed", extra={"error_type": type(exc).__name__})
+            return jsonify({"error": "Report could not be generated."}), 500
+        finally:
+            if conn is not None:
+                conn.close()
 
     @app.post("/api/audit/verify")
     @roles_required("ADMINISTRATOR")
