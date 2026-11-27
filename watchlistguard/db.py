@@ -91,12 +91,18 @@ class PostgresConnection:
     def __init__(self, raw):
         self.raw = raw
 
+    @staticmethod
+    def _sql(sql):
+        # psycopg treats percent signs as placeholder syntax when parameters
+        # are supplied. Escape SQL literals before translating qmark binds.
+        return sql.replace("%", "%%").replace("?", "%s")
+
     def execute(self, sql, params=()):
-        return self.raw.execute(sql.replace("?", "%s"), params)
+        return self.raw.execute(self._sql(sql), params)
 
     def executemany(self, sql, params):
         with self.raw.cursor() as cursor:
-            cursor.executemany(sql.replace("?", "%s"), params)
+            cursor.executemany(self._sql(sql), params)
             return cursor.rowcount
 
     def __enter__(self):
