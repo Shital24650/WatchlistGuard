@@ -18,7 +18,7 @@
 - `bandit -q -r app.py main.py watchlistguard`: passed with no findings after replacing dynamic report SQL composition with a fixed parameterized query.
 - `openapi-spec-validator` validated the served OpenAPI document successfully.
 - Python compilation, `git diff --check`, Alembic history, and offline SQL generation for `alembic upgrade head` passed.
-- The V3 PostgreSQL 16 review-fix job passed on run `45974533448`; V4 hosted CI including the PostgreSQL administrator concurrency test is pending.
+- GitHub Actions run `45975865158` passed both the SQLite/security job and PostgreSQL 16 job on the final V4 code. The PostgreSQL job passed all **9 tests**, including the concurrent PostgreSQL last-administrator demotion case, and applied Alembic migrations first.
 - No local query plan/EXPLAIN measurements are recorded; no performance improvement is claimed.
 - `render.yaml` and production database/environment settings were not changed; no deployment or production database was accessed.
 
