@@ -10,6 +10,8 @@ WatchlistGuard is an educational transaction-screening portfolio project. It dem
 - Flask dashboard with summary, CSV upload, screening action, results, and audit status.
 - JSON API documented with OpenAPI 3.0.3 and interactive Swagger UI.
 - SQLite path configurable with `WATCHLISTGUARD_DB` (or CLI `--db`).
+- Optional PostgreSQL backend using psycopg 3 and a bounded connection pool; SQLite remains the default.
+- Alembic versioned PostgreSQL schema with explicit operator-run migrations.
 - CSV upload restricted to `.csv`, sanitized filenames, and a 1 MB file limit.
 - Atomic idempotent ingestion: identical file bytes are skipped by SHA-256; changed files are deduplicated by the globally unique `transaction_ref` database constraint.
 - SQL-paginated report API with risk-level and screening-status filters.
@@ -40,7 +42,7 @@ watchlistguard/
 main.py CLI --------+
        |
        v
-SQLite database (configured path)
+SQLite (default) or PostgreSQL (configured URL)
 ```
 
 ## API endpoints
@@ -130,6 +132,21 @@ flask --app app run --host 127.0.0.1 --port 5000
 
 Open `http://127.0.0.1:5000` for the dashboard or `http://127.0.0.1:5000/api/docs` for Swagger UI. The database is initialized automatically. The included `data/transactions.csv` contains fictional sample records.
 
+### Database configuration and migrations
+
+`WATCHLISTGUARD_DB` remains the SQLite file path (default `data/watchlistguard.db`). Set `WATCHLISTGUARD_DATABASE_URL` to select PostgreSQL; accepted URL forms are `postgresql://...` and `postgres://...`. PostgreSQL requires psycopg 3 with its binary and pool extras. `WATCHLISTGUARD_DB_POOL_SIZE` controls the bounded pool (default 5). The CLI `--db` accepts a SQLite path or PostgreSQL URL.
+
+For a fresh PostgreSQL database, create an empty database and explicitly apply:
+
+```bash
+export WATCHLISTGUARD_DATABASE_URL='postgresql://USER:PASSWORD@HOST:5432/DB'
+alembic upgrade head
+```
+
+The application refuses to create or migrate PostgreSQL schemas at request time. SQLite continues to initialize its demo schema automatically. For an existing PostgreSQL installation, take a verified backup, inspect `alembic current` and `alembic history`, then apply reviewed migrations during a maintenance window. The initial migration creates schema only; it does **not** transfer rows from an existing SQLite file. Do not point migration commands at production without an approved backup and change process. No production database was used here.
+
+The PostgreSQL schema uses identity keys, foreign keys, unique constraints, checks, and indexes for normalized-name lookup, creation time, risk level, and the audit hash chain. Unique constraints provide transaction-reference and file-fingerprint idempotency. Transaction-scoped advisory locks serialize file fingerprint checks and audit-chain appends across PostgreSQL workers. SQLite retains `BEGIN IMMEDIATE` for ingestion serialization.
+
 For a production-style local process:
 
 ```bash
@@ -161,6 +178,8 @@ python -m unittest discover -v
 
 The tests cover the existing module/CLI behavior and Flask dashboard/API behavior. API integration tests create a fresh temporary directory and SQLite database per test; they do not use the configured live database or sample JSON/data files. Coverage includes health, valid and invalid uploads, malformed CSV, upload size, screening, reporting, audit success and tampering, OpenAPI JSON, Swagger UI, and existing form routes.
 
+PostgreSQL integration tests require a **disposable** empty database selected with `TEST_POSTGRES_URL`; without it they are reported as skipped (`NOT RUN`). The PostgreSQL CI job uses a PostgreSQL 16 service container and a dedicated test database. Never set these test variables to a production or Render URL. CI also runs Alembic migrations, Python compilation, and the SQLite suite.
+
 ## Deployment
 
 The repository includes `render.yaml` for a Gunicorn web service and `/health` health check.
@@ -171,7 +190,7 @@ The repository includes `render.yaml` for a Gunicorn web service and `/health` h
 4. Configure `FLASK_SECRET_KEY` in the Render environment.
 5. Check the deployed `/health` endpoint.
 
-**Storage limitation:** Render free web services have an ephemeral filesystem. A SQLite database in the application directory may be reset after restart, redeploy, or sleep. This configuration is suitable for a disposable portfolio demo, not durable storage. Persistent SQLite requires a persistent disk where supported; horizontally scaled production deployments should use a managed database. The demo API has no authentication, rate limiting, external sanctions-list updates, or production case-management workflow.
+**Storage limitation:** Render free web services have an ephemeral filesystem. A SQLite database in the application directory may be reset after restart, redeploy, or sleep. This configuration is suitable for a disposable portfolio demo, not durable storage. Persistent SQLite requires a persistent disk where supported; a PostgreSQL URL can target an appropriately managed non-production database. This code does not create hosting resources, change Render configuration, migrate production data, or deploy branches. The demo API has no authentication, rate limiting, external sanctions-list updates, or production case-management workflow.
 
 ## Screening model and limitations
 
