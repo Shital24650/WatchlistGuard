@@ -3,6 +3,7 @@ import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
+from .db import dialect
 
 GENESIS = "0" * 64
 
@@ -14,6 +15,10 @@ def _digest(event_id: int, timestamp: str, event_type: str, details: str, previo
 
 def log_event(conn: sqlite3.Connection, event_type: str, details: str) -> str:
     """Append one event, linking it to the preceding record hash."""
+    # Every PostgreSQL audit writer takes the same transaction lock before
+    # reading the chain head, preventing two writers from forking it.
+    if dialect(conn) == "postgresql":
+        conn.execute("SELECT pg_advisory_xact_lock(731942817)")
     previous = conn.execute("SELECT current_hash FROM audit_logs ORDER BY event_id DESC LIMIT 1").fetchone()
     prev_hash = previous[0] if previous else GENESIS
     timestamp = datetime.now(timezone.utc).isoformat()

@@ -9,7 +9,7 @@ from watchlistguard.audit import verify_chain
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Synthetic transaction screening demonstration")
-    parser.add_argument("--db", default="data/watchlistguard.db", help="SQLite database path (default: data/watchlistguard.db)")
+    parser.add_argument("--db", default=None, help="SQLite path or PostgreSQL URL (defaults to WATCHLISTGUARD_DATABASE_URL / WATCHLISTGUARD_DB)")
     sub = parser.add_subparsers(dest="command", required=True)
     ingest = sub.add_parser("ingest", help="Validate and ingest a CSV file"); ingest.add_argument("csv_file")
     sub.add_parser("screen", help="Screen pending transactions")

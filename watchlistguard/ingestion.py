@@ -9,6 +9,7 @@ from typing import Optional
 
 from .screening import normalize_name
 from .audit import log_event
+from .db import begin_write
 
 REQUIRED = {"transaction_ref", "customer_name", "amount", "currency"}
 
@@ -17,7 +18,7 @@ class IngestionError(ValueError):
     """Raised when an input CSV cannot be safely ingested."""
 
 
-def ingest_csv(conn: sqlite3.Connection, path: str, source_name: Optional[str] = None) -> dict[str, int]:
+def ingest_csv(conn, path: str, source_name: Optional[str] = None) -> dict[str, int]:
     """Ingest atomically; transaction_ref is the schema's unique identity."""
     file_path = Path(path)
     display_name = Path(source_name).name if source_name else file_path.name
@@ -39,7 +40,7 @@ def ingest_csv(conn: sqlite3.Connection, path: str, source_name: Optional[str] =
     # Serialize writers before checking the fingerprint: concurrent identical
     # uploads wait, then observe the processed_files record committed by the first.
     with conn:
-        conn.execute("BEGIN IMMEDIATE")
+        begin_write(conn)
         if conn.execute("SELECT 1 FROM processed_files WHERE sha256 = ?", (fingerprint,)).fetchone():
             return {"inserted": 0, "rejected": 0, "duplicates": 0, "skipped_file": 1}
 
