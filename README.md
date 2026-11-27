@@ -18,6 +18,9 @@ WatchlistGuard is an educational transaction-screening portfolio project. It dem
 - SQL-paginated report API with risk-level and screening-status filters.
 - Parameterized SQL, Jinja autoescaping, generic API errors, and security response headers.
 - Gunicorn WSGI server and Render Blueprint configuration.
+- Multi-stage, non-root Docker image and health-checked local Docker Compose stack.
+- JSON request logs with correlation IDs, request duration, response status, and safe failure categories.
+- Separate liveness (`/live`) and database readiness (`/ready`) checks; `/health` remains backward compatible.
 
 ## Architecture
 
@@ -53,6 +56,8 @@ All API responses use JSON except the Swagger UI HTML route. Screening and admin
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Check application and database availability |
+| GET | `/live` | Liveness check that does not depend on the database |
+| GET | `/ready` | Readiness check including database availability |
 | GET | `/api/openapi.json` | Retrieve the OpenAPI 3.0.3 document |
 | GET | `/api/docs` | Interactive Swagger UI |
 | POST | `/api/upload` | Upload a CSV as multipart field `file` |
@@ -157,6 +162,63 @@ The application refuses to create or migrate PostgreSQL schemas at request time.
 
 The PostgreSQL schema uses identity keys, foreign keys, unique constraints, checks, and indexes for normalized-name lookup, creation time, risk level, and the audit hash chain. Unique constraints provide transaction-reference and file-fingerprint idempotency. Transaction-scoped advisory locks serialize file fingerprint checks and audit-chain appends across PostgreSQL workers. SQLite retains `BEGIN IMMEDIATE` for ingestion serialization.
 
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `APP_ENV` | `development` in source; `production` in Docker | One of `development`, `testing`, or `production`; Compose reads it from `.app.env`. Production requires `FLASK_SECRET_KEY` and enables secure session cookies. |
+| `FLASK_SECRET_KEY` | Random per process in development/testing; required in production | Flask session signing key. Compose reads it from `.app.env`. Generate with `python -c 'import secrets; print(secrets.token_hex(32))'`. Keep it in a secret store, never in source or an image. Changing it invalidates active sessions. |
+| `WATCHLISTGUARD_DATABASE_URL` | Unset | PostgreSQL URL; takes precedence over `WATCHLISTGUARD_DB`. Keep credentials in a secret store. |
+| `WATCHLISTGUARD_DB` | `data/watchlistguard.db` | SQLite database path. |
+| `WATCHLISTGUARD_DB_POOL_SIZE` | `5` | PostgreSQL pool maximum, integer from 1 to 50. |
+| `WATCHLISTGUARD_COOKIE_SECURE` | `false` outside production | Force Secure on session cookies when TLS terminates outside Render/production detection. |
+| `PORT` | `5000` | HTTP listener used by Gunicorn and the container health check. |
+| `GUNICORN_WORKERS` | `2` in Docker | Gunicorn worker count. |
+| `GUNICORN_THREADS` | `4` in Docker | Threads per worker. |
+| `GUNICORN_TIMEOUT` | `60` seconds in Docker | Gunicorn request timeout. |
+| `GUNICORN_GRACEFUL_TIMEOUT` | `30` seconds in Docker | Time for requests to finish after SIGTERM. |
+| `POSTGRES_DB` | `watchlistguard` in `.env.example` | Local Compose PostgreSQL database name. |
+| `POSTGRES_USER` | `watchlistguard` in `.env.example` | Local Compose PostgreSQL username. |
+| `POSTGRES_PASSWORD` | Blank in `.env.example`; required by PostgreSQL | Local Compose database password; keep it private. Reserved characters are encoded by the container entrypoint. |
+| `POSTGRES_HOST` | `postgres` in Compose | Local Compose PostgreSQL service hostname. |
+| `POSTGRES_PORT` | `5432` in Compose | Local Compose PostgreSQL port. |
+| `APP_PORT` | `5000` | Host port mapped to the local Compose app. |
+
+`APP_ENV=development` supports local SQLite and a per-process random session key. That key changes on restart, so local sessions expire. Tests use a test-only key through Flask test configuration. Production startup validates the environment name, fails closed if the signing key is missing, and validates the PostgreSQL pool limit. The CLI continues to accept SQLite paths and PostgreSQL URLs via `--db`.
+
+### Docker local development
+
+Docker and the Docker Compose plugin are required. Copy `.env.example` to `.env` and `.app.env.example` to `.app.env`, then populate the blank secret fields with private random values. Compose passes database settings through `.env` and app-only settings through `.app.env`; this keeps the Flask signing key out of the PostgreSQL container. The entrypoint percent-encodes PostgreSQL URI components. Both local env files are ignored by Git.
+
+```bash
+cp .env.example .env
+cp .app.env.example .app.env
+# Edit both env files and generate private values with Python's secrets module.
+docker compose build
+docker compose run --rm app alembic upgrade head
+docker compose up --wait
+```
+
+The app waits for PostgreSQL's health check before starting. PostgreSQL data persists in the named `postgres_data` volume. The app readiness check remains unavailable until Alembic has created the schema. Browse to `http://127.0.0.1:5000`; `/live` checks the process, while `/ready` and existing `/health` check the database too. To use SQLite without Compose, set `WATCHLISTGUARD_DB` and omit `WATCHLISTGUARD_DATABASE_URL`. `docker compose down` keeps the named volume; `docker compose down --volumes` deletes the local database volume.
+
+The production Docker image pins its Python 3.12 slim base by digest, separates wheel building from runtime, excludes tests and local database files, runs as an unprivileged `app` user, and starts Gunicorn with SIGTERM graceful shutdown. Secrets are supplied at runtime and are not copied into the image. `requirements.txt` retains supported version ranges for local and Render workflows; `requirements.lock` pins the Python 3.12 container runtime dependency set for repeatable image builds. Refresh the base digest and lock deliberately when updating runtime dependencies.
+
+For a production deployment using this image, supply `APP_ENV=production`, a private strong `FLASK_SECRET_KEY`, and the intended `WATCHLISTGUARD_DATABASE_URL` through the hosting platform's secret configuration. Build and run Alembic migrations as an explicit reviewed release step; the web container never migrates a PostgreSQL schema at startup. `/ready` must pass before routing traffic. The V5 work does not alter the existing Render service or deploy any image.
+
+### Logs, health, and troubleshooting
+
+Application logs are JSON with a UTC timestamp, severity, fixed event name, request ID, method, matched route (never the query string), status, and duration. The server generates an `X-Request-ID` for each request and returns it in the response; caller-supplied values are ignored. Failure events include exception type but omit exception text and tracebacks. Passwords, cookies, authorization headers, API keys, database credentials, and transaction fields are not logged. Gunicorn access logging is disabled to avoid logging arbitrary request targets.
+
+`GET /live` returns `{"status":"ok"}` without touching the database. `GET /ready` checks the configured database and schema and returns 503 with `{"status":"unavailable"}` on failure. `/health` retains its previous success/failure status and JSON body for the existing Render health check.
+
+Common local issues:
+
+- The Compose containers do not become healthy: populate the database password in `.env` and the signing key in `.app.env`.
+- `/ready` returns 503: check PostgreSQL health and run `docker compose run --rm app alembic upgrade head` against the local Compose database.
+- Port 5000 is busy: set `APP_PORT` in `.env` to an available host port.
+- PostgreSQL URL parsing fails: Compose credentials are percent-encoded by the container entrypoint; percent-encode reserved characters in a manually supplied `WATCHLISTGUARD_DATABASE_URL`.
+- PostgreSQL integration tests are skipped: provide `TEST_POSTGRES_URL` for a disposable empty test database; never point it at a live or valuable database.
+
 For a production-style local process:
 
 ```bash
@@ -203,7 +265,7 @@ python -m unittest discover -v
 
 The tests cover the existing module/CLI behavior and Flask dashboard/API behavior. API integration tests create a fresh temporary directory and SQLite database per test; they do not use the configured live database or sample JSON/data files. Coverage includes health, valid and invalid uploads, malformed CSV, upload size, screening, reporting, audit success and tampering, authentication, roles, CSRF, sessions, rate limiting, password hashing, security events, OpenAPI JSON, Swagger UI, and existing form routes.
 
-Install `requirements-dev.txt` for CI tools (Bandit and `openapi-spec-validator`). GitHub Actions runs the SQLite/security suites, Bandit, OpenAPI contract validation, Python compilation, Alembic validation, and PostgreSQL integration tests. PostgreSQL integration tests require a **disposable** empty database selected with `TEST_POSTGRES_URL`; without it they are reported as skipped (`NOT RUN`). The PostgreSQL CI job uses a PostgreSQL 16 service container and a dedicated test database. Never set these test variables to a production or Render URL.
+Install `requirements-dev.txt` for CI tools. GitHub Actions runs the SQLite/security suites, Bandit, dependency audit, OpenAPI contract validation, Python compilation, PostgreSQL migration upgrade/downgrade validation, PostgreSQL integration tests, and a production Docker image build. PostgreSQL integration tests require a **disposable** empty database selected with `TEST_POSTGRES_URL`; without it they are reported as skipped (`NOT RUN`). The PostgreSQL CI job uses a PostgreSQL 16 service container and a dedicated test database. Never set these test variables to a production or Render URL. CI does not push images or deploy.
 
 ## Deployment
 
